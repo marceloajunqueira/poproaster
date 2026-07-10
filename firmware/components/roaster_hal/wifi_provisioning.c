@@ -42,7 +42,7 @@ static void start_ap_portal(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     /* NOTE: the actual DNS-hijack captive portal HTTP redirect is implemented
-     * alongside the setup web page (T049, webui/src/wifi_setup.html) using
+     * alongside the setup web page (T049, firmware/webui/src/wifi_setup.html) using
      * the HTTP server started in web_api/server.c. */
 }
 
