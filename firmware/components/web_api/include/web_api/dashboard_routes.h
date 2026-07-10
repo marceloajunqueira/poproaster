@@ -14,17 +14,26 @@
 
 /** Shared Material-Design-inspired dark theme (no external CDN - the device
  * must work fully offline/on its own AP per FR-021) reused by every
- * "connected" web page (dashboard, history, presets, wifi) so they look
- * consistent without duplicating the whole stylesheet in every routes
- * file. Layout mirrors the on-device display's nav_shell.c: a fixed left
- * sidebar (icon + label nav items, active-item accent highlight) with the
- * page content filling the rest of the viewport - collapses to a
- * horizontal top bar on narrow/phone screens via a media query. Every page
- * wraps its markup as `<div class='app'><nav class='sidebar'>...</nav>
- * <main class='content'>...page content...</main></div>` (see
- * web_ui_send_nav_bar() below for the sidebar itself). */
+ * "connected" web page (dashboard, history, presets, wifi, diagnostics,
+ * ota) so they look consistent without duplicating the whole stylesheet in
+ * every routes file. Layout mirrors the on-device display's nav_shell.c: a
+ * fixed left sidebar (icon + label nav items, active-item accent
+ * highlight) with the page content filling the rest of the viewport -
+ * collapses to a horizontal top bar on narrow/phone screens via a media
+ * query. Every page wraps its markup as `<div class='app'><nav
+ * class='sidebar'>...</nav> <main class='content'>...page
+ * content...</main></div>` (see web_ui_send_nav_bar() below for the
+ * sidebar itself).
+ *
+ * Raw CSS body only (NOT wrapped in `<style>` tags) - served as its own
+ * cacheable `GET /style.css` response (dashboard_routes.c) instead of being
+ * re-sent inline on every single page load. Pages should include
+ * WEB_UI_STYLE_LINK in their `<head>` instead of this macro directly -
+ * every page re-inlining this whole block (several KB of CSS text) was a
+ * major contributor to "the web UI is slow to open pages": the browser now
+ * fetches it once and caches it (Cache-Control, see style_css_get_handler)
+ * across every subsequent page navigation. */
 #define WEB_UI_STYLE \
-    "<style>" \
     ":root{--bg:#121212;--surface:#1e1e1e;--sidebar:#181818;--primary:#FF9746;--secondary:#616161;" \
     "--danger:#B3261E;--on-surface:#e0e0e0;--muted:#9e9e9e;--fan:#66BB6A;}" \
     "*{box-sizing:border-box;}" \
@@ -54,7 +63,7 @@
     ".sub{color:var(--muted);font-size:13px;font-weight:400;margin:0 0 8px;}" \
     "#alarmBanner{display:none;background:var(--danger);color:#fff;border-radius:8px;padding:12px 16px;" \
     "margin:0 0 16px;align-items:center;justify-content:space-between;gap:12px;}" \
-    "canvas{width:100%;height:180px;background:#0d0d0d;border-radius:6px;display:block;}" \
+    "canvas{width:100%;height:260px;background:#0d0d0d;border-radius:6px;display:block;}" \
     ".legend{color:var(--muted);font-size:12px;margin-top:6px;}" \
     ".legend .bt{color:var(--primary);} .legend .fan{color:var(--fan);}" \
     ".grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;}" \
@@ -79,7 +88,25 @@
     "overflow-wrap:anywhere;}" \
     "table th{color:var(--muted);font-weight:500;}" \
     "table tr:last-child td{border-bottom:none;}" \
-    "</style>"
+    /* Roast History "catalog" cards (operator-reported: the old plain list
+     * with a bare blue-on-black hyperlink per row looked broken/ugly). */ \
+    ".history-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;margin-top:8px;}" \
+    ".history-card{background:#2a2a2a;border-radius:8px;padding:16px 18px;display:flex;flex-direction:column;gap:8px;}" \
+    ".history-card .title{font-size:15px;font-weight:500;color:var(--on-surface);overflow-wrap:anywhere;}" \
+    ".history-card .meta{font-size:12px;color:var(--muted);overflow-wrap:anywhere;}" \
+    ".history-card .stats-mini{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;margin-top:6px;}" \
+    ".history-card .stat-mini{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);" \
+    "background:#333;border-radius:5px;padding:6px 10px;}" \
+    ".history-card .stat-mini .icon{font-size:13px;line-height:1;}" \
+    ".history-card .stat-mini b{color:var(--on-surface);font-weight:500;}" \
+    ".history-card .actions{display:flex;gap:8px;margin-top:4px;}" \
+    ".history-card .actions a,.history-card .actions button{padding:6px 12px;font-size:13px;}"
+
+/** Every page's `<head>` should include this instead of inlining WEB_UI_STYLE
+ * directly - fetches the shared stylesheet from the cacheable /style.css
+ * route (registered by dashboard_routes_register()) instead of re-sending
+ * several KB of CSS text on every single page load. */
+#define WEB_UI_STYLE_LINK "<link rel='stylesheet' href='/style.css'>"
 
 /** Sends the shared LEFT SIDEBAR navigation (Dashboard/Roast History/
  * Presets/Wi-Fi Setup - collapses to a horizontal top bar on narrow

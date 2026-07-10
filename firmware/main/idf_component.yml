@@ -7,5 +7,7 @@ dependencies:
   espressif/esp_lcd_touch_gt911: "^1.1.0"
   lvgl/lvgl: "^8.4.0"
   joltwallet/littlefs: "^1.14.8"
+  espressif/esp-modbus: "^2.1"
+  espressif/mdns: "^1.2"
   idf:
     version: ">=5.1"

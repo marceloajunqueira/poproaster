@@ -20,14 +20,38 @@
 #define SESSION_STORE_DEFAULT_RETENTION 30
 #define SESSION_STORE_ID_MAX_LEN 40
 
+#define SESSION_BATCH_NAME_MAX_LEN 32
+#define SESSION_BATCH_NOTES_MAX_LEN 128
+
+/** T057: BatchRecord metadata - coffee name/origin/weight/notes for this
+ * specific roast, set via the display's "Batch Info" form (roast_dashboard.c)
+ * before Start Roast (or any time before it, applied at the next roast
+ * start). Purely informational, not used by any control logic. */
+typedef struct {
+    char coffee_name[SESSION_BATCH_NAME_MAX_LEN];
+    char origin[SESSION_BATCH_NAME_MAX_LEN];
+    float weight_g;
+    char notes[SESSION_BATCH_NOTES_MAX_LEN];
+} batch_record_t;
+
 /** Per-session metadata: a human-friendly sequential roast number (since
  * there's no RTC/NTP - see spec Assumptions) plus a full snapshot of
  * whichever profile was selected when the roast started (FR-034: deleting
- * the original profile later must never affect stored history). */
+ * the original profile later must never affect stored history), plus the
+ * BatchRecord (T057) captured at the same moment.
+ *
+ * NOTE: this struct grew a `batch` field after `has_profile`/`profile` were
+ * already shipped - session_store_load_meta()'s fread() reads exactly
+ * sizeof(session_meta_t) bytes, so a `.meta` file written by an OLDER
+ * firmware build (without `batch`) is simply too short to satisfy a full
+ * read and load_meta() already treats that as ESP_ERR_NOT_FOUND (same
+ * graceful degradation as sessions that never had a .meta file at all) -
+ * no explicit versioning/migration needed. */
 typedef struct {
     uint32_t roast_number;
     bool has_profile;
     roast_profile_t profile;
+    batch_record_t batch;
 } session_meta_t;
 
 esp_err_t session_store_init(void);

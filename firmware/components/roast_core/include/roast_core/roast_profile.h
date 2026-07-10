@@ -64,6 +64,21 @@ uint8_t roast_profile_get_target_fan_pct(const roast_profile_t *profile, uint32_
 /** Returns the index (0-based) of the setpoint segment `elapsed_s` falls into - used by the T034/T035 curve follower to detect when a manual override should expire (segment boundary crossed). Clamped to the last segment past the profile's total duration. */
 uint8_t roast_profile_get_segment_index(const roast_profile_t *profile, uint32_t elapsed_s);
 
+/**
+ * Per operator requirement: every profile must end with exactly one
+ * Cooling segment (heater forced off, fixed fan speed) - it's no longer an
+ * optional per-segment toggle. Normalizes `profile` in place so its LAST
+ * point is always is_cooling=true (appending a default-duration one if
+ * needed, or converting the existing last segment if already at
+ * ROAST_PROFILE_MAX_POINTS), and demotes any INTERMEDIATE point that was
+ * (e.g. from older/imported data) marked is_cooling back to a normal
+ * segment. Called by both the on-device editor (profile_editor.c) and the
+ * web editor (presets_routes.c) whenever a profile is loaded/created/
+ * imported, so the UI never needs to render a per-segment Cooling
+ * toggle - the last segment simply always IS the Cooling one.
+ */
+void roast_profile_ensure_trailing_cooling(roast_profile_t *profile);
+
 #ifdef __cplusplus
 }
 #endif

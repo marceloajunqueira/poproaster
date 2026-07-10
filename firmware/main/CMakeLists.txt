@@ -11,5 +11,5 @@ idf_component_register(
         storage
         ui_display
         web_api
-        # TODO(T047): re-add artisan_adapter once that component is implemented.
+        artisan_adapter
 )

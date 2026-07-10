@@ -10,6 +10,10 @@ idf_component_register(
         "screens/profile_list.c"
         "screens/profile_editor.c"
         "screens/session_review.c"
+        "screens/settings_hub.c"
+        "screens/peripheral_test.c"
+        "screens/sensor_calibration.c"
+        "screens/wifi_setup.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

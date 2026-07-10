@@ -9,6 +9,7 @@ idf_component_register(
         "roast_profile.c"
         "profile_curve_follower.c"
         "heater_pid.c"
+        "roast_events.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

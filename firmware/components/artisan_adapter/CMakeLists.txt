@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "artisan_bridge.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        roaster_hal
+        roast_core
+        safety
+        espressif__esp-modbus
+        freertos
+        esp_timer
+)

@@ -26,6 +26,16 @@ typedef enum {
     I18N_KEY_RESUME,
     I18N_KEY_EMERGENCY_STOP,
     I18N_KEY_ALARM_ACKNOWLEDGE,
+    I18N_KEY_NAV_ROAST,
+    I18N_KEY_NAV_MANUAL,
+    I18N_KEY_NAV_PRESETS,
+    I18N_KEY_NAV_HISTORY,
+    I18N_KEY_NAV_CONFIG,
+    I18N_KEY_CONFIG_TITLE,
+    I18N_KEY_PERIPHERAL_TEST,
+    I18N_KEY_SENSOR_CALIBRATION,
+    I18N_KEY_WIFI_SETUP,
+    I18N_KEY_LANGUAGE,
     I18N_KEY_COUNT,
 } i18n_key_t;
 
@@ -39,3 +49,6 @@ i18n_lang_t i18n_get_language(void);
 
 /** Returns the localized string for a given key in the currently active language. */
 const char *i18n_get(i18n_key_t key);
+
+/** Returns a short display name for a language ("EN"/"PT"/"ES"), for language-picker UI. */
+const char *i18n_get_language_code(i18n_lang_t lang);

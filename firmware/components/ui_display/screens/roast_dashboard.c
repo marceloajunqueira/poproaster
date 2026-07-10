@@ -3,6 +3,7 @@
  * @brief Real-time roast telemetry dashboard implementation (see header).
  */
 #include <stdio.h>
+#include <string.h>
 #include "esp_lvgl_port.h"
 #include "esp_log.h"
 
@@ -10,12 +11,17 @@
 #include "roast_core/command_dispatcher.h"
 #include "roast_core/roast_telemetry_service.h"
 #include "roast_core/roast_profile.h"
+#include "roast_core/roast_events.h"
 #include "storage/profile_store.h"
 #include "storage/session_store.h"
 #include "hal/wifi_provisioning.h"
 #include "ui_display/screens/roast_dashboard.h"
 
 static const char *TAG = "roast_dashboard";
+
+/* Forward declaration - defined near roast_dashboard_show_in() below, but
+ * also needed earlier in the file (batch_info_btn_event_cb()'s weight row). */
+static lv_obj_t *make_flex_row(lv_obj_t *col_parent, lv_coord_t width);
 
 /* The live chart's timeline spans the exact total duration of the selected
  * preset (sum of every setpoint's duration) - not a fixed window - so the
@@ -26,7 +32,6 @@ static const char *TAG = "roast_dashboard";
 
 static lv_obj_t *s_chart;
 static lv_chart_series_t *s_chart_bt_series;
-static lv_chart_series_t *s_chart_fan_series;
 static lv_obj_t *s_target_temp_line;
 static lv_obj_t *s_target_fan_line;
 static lv_point_t s_target_temp_points[MAX_CHART_POINTS];
@@ -45,6 +50,31 @@ static int s_segment_label_count;
 static roast_profile_t s_active_profile;
 static bool s_has_profile = false;
 static int s_last_known_selected_id = -2; /* sentinel distinct from -1 ("no preset selected") so the very first tick always syncs. */
+
+/* T056/T065: vertical reference-line markers for operator-marked roast
+ * events (Turning Point, Dry End, First/Second Crack, Drop, Cool Start,
+ * Note). One lv_line (full chart height, thin, solid, distinct purple) +
+ * one small short-label lv_label per marked event, both children of
+ * s_chart just like the dashed target-curve overlay lines above - same
+ * "plain lv_line/lv_label overlay in chart-content-box-local pixel space"
+ * technique, since lv_chart's own series drawing can't do this. */
+#define MAX_EVENT_MARKERS ROAST_EVENTS_MAX
+static lv_obj_t *s_event_marker_lines[MAX_EVENT_MARKERS];
+static lv_obj_t *s_event_marker_labels[MAX_EVENT_MARKERS];
+static int s_event_marker_count;
+static size_t s_last_known_event_count;
+static lv_obj_t *s_mark_event_btn;
+
+/* T057: BatchRecord metadata (coffee name/origin/weight/notes) - editable
+ * any time before Start Roast via a small overlay form, same textarea+
+ * keyboard overlay technique as the rename dialog elsewhere in this
+ * codebase. Applied into the NEXT session's session_meta_t by
+ * roast_telemetry_service_on_roast_started(). */
+static lv_obj_t *s_batch_info_btn;
+static batch_record_t s_batch_draft;
+static lv_obj_t *s_batch_coffee_label;
+static lv_obj_t *s_batch_origin_label;
+static lv_obj_t *s_batch_weight_label;
 
 static lv_obj_t *s_preset_label;
 static lv_obj_t *s_wifi_ip_label;
@@ -75,6 +105,7 @@ static lv_style_t s_style_btn_secondary;
 static lv_style_t s_style_btn_label;
 static lv_style_t s_style_seg_temp_label;
 static lv_style_t s_style_seg_fan_label;
+static lv_style_t s_style_event_marker_label;
 static bool s_styles_ready = false;
 
 static void ensure_styles(void)
@@ -117,6 +148,11 @@ static void ensure_styles(void)
     lv_style_set_text_color(&s_style_seg_fan_label, lv_color_hex(0x66BB6A));
     lv_style_set_text_font(&s_style_seg_fan_label, &lv_font_montserrat_12);
 
+    /* T056/T065: event marker vertical-line short labels. */
+    lv_style_init(&s_style_event_marker_label);
+    lv_style_set_text_color(&s_style_event_marker_label, lv_color_hex(0xBA68C8));
+    lv_style_set_text_font(&s_style_event_marker_label, &lv_font_montserrat_12);
+
     s_styles_ready = true;
 }
 
@@ -126,7 +162,6 @@ static void reset_chart(void)
         return;
     }
     lv_chart_set_all_value(s_chart, s_chart_bt_series, LV_CHART_POINT_NONE);
-    lv_chart_set_all_value(s_chart, s_chart_fan_series, LV_CHART_POINT_NONE);
 }
 
 /* roast_dashboard_show_in() tears down and recreates this whole screen
@@ -140,7 +175,7 @@ static void reset_chart(void)
  * returning to this tab always shows the full curve so far. */
 static void replay_current_session_into_chart(void)
 {
-    if (s_chart == NULL || s_chart_bt_series == NULL || s_chart_fan_series == NULL) {
+    if (s_chart == NULL || s_chart_bt_series == NULL) {
         return;
     }
     const roast_session_t *session = session_sm_get_state();
@@ -162,7 +197,6 @@ static void replay_current_session_into_chart(void)
             if (idx < 0) idx = 0;
             if (idx >= MAX_CHART_POINTS) idx = MAX_CHART_POINTS - 1;
             lv_chart_set_value_by_id(s_chart, s_chart_bt_series, (uint16_t)idx, (lv_coord_t)bt);
-            lv_chart_set_value_by_id(s_chart, s_chart_fan_series, (uint16_t)idx, (lv_coord_t)fan);
         }
     }
     fclose(f);
@@ -290,6 +324,439 @@ static void rebuild_target_lines(void)
     }
 }
 
+/* T056/T065: (re)draws a thin vertical line + short label for every event
+ * marked so far in the CURRENT session (roast_events_get_all()) - same
+ * chart-content-box-local-pixel-space overlay technique as
+ * rebuild_target_lines(). Safe to call repeatedly (e.g. right after marking
+ * a new event, and once at show-time) - always clears the previous set of
+ * marker objects first. */
+static void rebuild_event_markers(void)
+{
+    if (s_chart == NULL) {
+        return;
+    }
+    for (int i = 0; i < s_event_marker_count; i++) {
+        if (s_event_marker_lines[i] != NULL) {
+            lv_obj_del(s_event_marker_lines[i]);
+            s_event_marker_lines[i] = NULL;
+        }
+        if (s_event_marker_labels[i] != NULL) {
+            lv_obj_del(s_event_marker_labels[i]);
+            s_event_marker_labels[i] = NULL;
+        }
+    }
+    s_event_marker_count = 0;
+
+    lv_coord_t content_w = lv_obj_get_content_width(s_chart);
+    lv_coord_t content_h = lv_obj_get_content_height(s_chart);
+    if (content_w <= 0 || content_h <= 0 || s_chart_duration_s == 0) {
+        return;
+    }
+
+    roast_event_record_t events[MAX_EVENT_MARKERS];
+    size_t count = roast_events_get_all(events, MAX_EVENT_MARKERS);
+
+    for (size_t i = 0; i < count; i++) {
+        int64_t elapsed_s = events[i].elapsed_ms / 1000;
+        if (elapsed_s < 0) {
+            elapsed_s = 0;
+        }
+        lv_coord_t x = (lv_coord_t)((int64_t)elapsed_s * content_w / (int64_t)s_chart_duration_s);
+        if (x < 0) x = 0;
+        if (x > content_w) x = content_w;
+
+        lv_point_t pts[2] = {{x, 0}, {x, content_h}};
+        lv_obj_t *line = lv_line_create(s_chart);
+        lv_obj_set_style_line_color(line, lv_color_hex(0xBA68C8), LV_PART_MAIN);
+        lv_obj_set_style_line_width(line, 1, LV_PART_MAIN);
+        lv_obj_set_style_line_dash_width(line, 3, LV_PART_MAIN);
+        lv_obj_set_style_line_dash_gap(line, 3, LV_PART_MAIN);
+        lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_pos(line, 0, 0);
+        lv_line_set_points(line, pts, 2);
+        s_event_marker_lines[s_event_marker_count] = line;
+
+        lv_obj_t *lbl = lv_label_create(s_chart);
+        lv_obj_add_style(lbl, &s_style_event_marker_label, LV_PART_MAIN);
+        lv_label_set_text(lbl, roast_event_short_label(events[i].type));
+        lv_obj_set_pos(lbl, x + 2, 2);
+        s_event_marker_labels[s_event_marker_count] = lbl;
+
+        s_event_marker_count++;
+    }
+}
+
+/* Full-screen overlay (parented directly to lv_scr_act(), same technique as
+ * nav_shell's alarm banner / profile_editor's rename dialog, so it covers
+ * the sidebar too) with one button per roast_event_type_t. Tapping a button
+ * marks that event and closes the overlay. */
+static void event_overlay_btn_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    roast_event_type_t type = (roast_event_type_t)(intptr_t)lv_event_get_user_data(e);
+    roast_events_mark(type);
+    rebuild_event_markers();
+    s_last_known_event_count = roast_events_get_count();
+
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_t *overlay = lv_obj_get_parent(lv_obj_get_parent(btn));
+    lv_obj_del(overlay);
+}
+
+static void event_overlay_cancel_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    /* Cancel now lives INSIDE `card` (one level deeper than before, so it
+     * gets the card's own bottom padding as margin) - so finding the
+     * overlay needs the same two-levels-up walk as event_overlay_btn_event_cb
+     * (btn -> card -> overlay), not one. */
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_t *overlay = lv_obj_get_parent(lv_obj_get_parent(btn));
+    lv_obj_del(overlay);
+}
+
+static void mark_event_btn_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    lv_obj_t *overlay = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_border_width(overlay, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(overlay, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(overlay);
+
+    /* Auto-height card (LV_SIZE_CONTENT) - same rationale as the Batch Info
+     * overlay's fix: a fixed pixel height risks clipping content instead of
+     * growing with it. Only 4 events are ever manually markable now
+     * (Turning Point and Cool Start/Drop are auto-detected - see
+     * roast_events.h) - first/second crack start/end, the audible cues no
+     * sensor on this hardware can detect. Full names instead of
+     * abbreviations per operator request (there's room for it now that
+     * there are only 4 buttons instead of 9). */
+    static const roast_event_type_t kManualEventTypes[] = {
+        ROAST_EVENT_FC_START,
+        ROAST_EVENT_FC_END,
+        ROAST_EVENT_SC_START,
+        ROAST_EVENT_SC_END,
+    };
+    const size_t manual_event_count = sizeof(kManualEventTypes) / sizeof(kManualEventTypes[0]);
+
+    lv_obj_t *card = lv_obj_create(overlay);
+    lv_obj_set_size(card, 300, LV_SIZE_CONTENT);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x1e1e1e), LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(card, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(card, 8, LV_PART_MAIN);
+
+    for (size_t i = 0; i < manual_event_count; i++) {
+        roast_event_type_t t = kManualEventTypes[i];
+        lv_obj_t *btn = lv_btn_create(card);
+        lv_obj_set_size(btn, 130, 48);
+        lv_obj_add_event_cb(btn, event_overlay_btn_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)t);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(lbl, 118);
+        lv_label_set_text(lbl, roast_event_full_label(t));
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_center(lbl);
+    }
+
+    /* Cancel lives INSIDE the card (last flex child), same fix as the
+     * Batch Info overlay - guarantees proper margin below it instead of
+     * risking an awkward gap to a separately-positioned bottom button. */
+    lv_obj_t *cancel_btn = lv_btn_create(card);
+    lv_obj_set_size(cancel_btn, 100, 32);
+    lv_obj_set_style_bg_color(cancel_btn, lv_color_hex(0x616161), LV_PART_MAIN);
+    lv_obj_add_event_cb(cancel_btn, event_overlay_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cancel_lbl = lv_label_create(cancel_btn);
+    lv_label_set_text(cancel_lbl, "Cancel");
+    lv_obj_center(cancel_lbl);
+}
+
+/* T057: BatchRecord metadata form - a textarea+keyboard overlay-of-an-overlay
+ * (same nested-overlay technique as wifi_setup.c) for each text field,
+ * applying to s_batch_draft and immediately persisting via
+ * roast_telemetry_service_set_pending_batch_info() on every edit (simpler,
+ * safer UX than a separate explicit Save step for this non-critical,
+ * purely-informational data). */
+static char *s_batch_edit_dest;
+static size_t s_batch_edit_dest_len;
+static lv_obj_t *s_batch_edit_preview_label;
+static const char *s_batch_edit_preview_prefix;
+
+static void batch_text_ok_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    lv_obj_t *ta = (lv_obj_t *)lv_event_get_user_data(e);
+    const char *text = lv_textarea_get_text(ta);
+    if (text != NULL) {
+        strncpy(s_batch_edit_dest, text, s_batch_edit_dest_len - 1);
+        s_batch_edit_dest[s_batch_edit_dest_len - 1] = '\0';
+    }
+    if (s_batch_edit_preview_label != NULL) {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "%s%s", s_batch_edit_preview_prefix, s_batch_edit_dest[0] ? s_batch_edit_dest : "(empty)");
+        lv_label_set_text(s_batch_edit_preview_label, buf);
+    }
+    roast_telemetry_service_set_pending_batch_info(&s_batch_draft);
+    lv_obj_t *overlay = lv_obj_get_parent(lv_obj_get_parent(ta));
+    lv_obj_del(overlay);
+}
+
+static void batch_text_cancel_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_t *overlay = lv_obj_get_parent(lv_obj_get_parent(btn));
+    lv_obj_del(overlay);
+}
+
+static void open_batch_text_overlay(const char *title, char *dest, size_t dest_len, lv_obj_t *preview_label,
+                                     const char *preview_prefix)
+{
+    s_batch_edit_dest = dest;
+    s_batch_edit_dest_len = dest_len;
+    s_batch_edit_preview_label = preview_label;
+    s_batch_edit_preview_prefix = preview_prefix;
+
+    lv_obj_t *overlay = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x121212), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(overlay, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(overlay, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title_lbl = lv_label_create(overlay);
+    lv_obj_add_style(title_lbl, &s_style_value, LV_PART_MAIN);
+    lv_label_set_text(title_lbl, title);
+    lv_obj_align(title_lbl, LV_ALIGN_TOP_MID, 0, 8);
+
+    lv_obj_t *row = lv_obj_create(overlay);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(90), 40);
+    lv_obj_align(row, LV_ALIGN_TOP_MID, 0, 36);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 8, LV_PART_MAIN);
+
+    lv_obj_t *ta = lv_textarea_create(row);
+    lv_textarea_set_one_line(ta, true);
+    lv_textarea_set_max_length(ta, (uint32_t)(dest_len - 1));
+    lv_textarea_set_text(ta, dest);
+    lv_obj_set_flex_grow(ta, 1);
+    lv_obj_set_height(ta, 36);
+
+    lv_obj_t *ok_btn = lv_btn_create(row);
+    lv_obj_add_style(ok_btn, &s_style_btn_primary, LV_PART_MAIN);
+    lv_obj_set_size(ok_btn, 50, 32);
+    lv_obj_add_event_cb(ok_btn, batch_text_ok_cb, LV_EVENT_CLICKED, ta);
+    lv_obj_t *ok_lbl = lv_label_create(ok_btn);
+    lv_obj_add_style(ok_lbl, &s_style_btn_label, LV_PART_MAIN);
+    lv_label_set_text(ok_lbl, LV_SYMBOL_OK);
+    lv_obj_center(ok_lbl);
+
+    lv_obj_t *cancel_btn2 = lv_btn_create(row);
+    lv_obj_add_style(cancel_btn2, &s_style_btn_secondary, LV_PART_MAIN);
+    lv_obj_set_size(cancel_btn2, 50, 32);
+    lv_obj_add_event_cb(cancel_btn2, batch_text_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cancel_lbl2 = lv_label_create(cancel_btn2);
+    lv_obj_add_style(cancel_lbl2, &s_style_btn_label, LV_PART_MAIN);
+    lv_label_set_text(cancel_lbl2, LV_SYMBOL_CLOSE);
+    lv_obj_center(cancel_lbl2);
+
+    lv_obj_t *kb = lv_keyboard_create(overlay);
+    lv_keyboard_set_textarea(kb, ta);
+    lv_obj_set_size(kb, LV_PCT(100), 170);
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_state(ta, LV_STATE_FOCUSED);
+}
+
+static void batch_coffee_btn_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    open_batch_text_overlay("Coffee Name", s_batch_draft.coffee_name, sizeof(s_batch_draft.coffee_name),
+                             s_batch_coffee_label, "Coffee: ");
+}
+
+static void batch_origin_btn_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    open_batch_text_overlay("Origin", s_batch_draft.origin, sizeof(s_batch_draft.origin),
+                             s_batch_origin_label, "Origin: ");
+}
+
+static void batch_weight_update_label(void)
+{
+    if (s_batch_weight_label == NULL) {
+        return;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Weight: %.0fg", (double)s_batch_draft.weight_g);
+    lv_label_set_text(s_batch_weight_label, buf);
+}
+
+static void batch_weight_minus_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    s_batch_draft.weight_g -= 5.0f;
+    if (s_batch_draft.weight_g < 0.0f) {
+        s_batch_draft.weight_g = 0.0f;
+    }
+    batch_weight_update_label();
+    roast_telemetry_service_set_pending_batch_info(&s_batch_draft);
+}
+
+static void batch_weight_plus_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    s_batch_draft.weight_g += 5.0f;
+    batch_weight_update_label();
+    roast_telemetry_service_set_pending_batch_info(&s_batch_draft);
+}
+
+static void batch_info_overlay_close_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    /* Close lives INSIDE `card` (one level deeper than before, so it gets
+     * the card's own bottom padding as margin) - so finding the overlay
+     * needs to walk up two levels (btn -> card -> overlay), not one. Bug
+     * fix: the previous single-level walk deleted `card` instead of
+     * `overlay`, leaving the full-screen dimmed overlay stuck forever
+     * (parented directly to lv_scr_act(), outside anything nav_shell tab
+     * switches would ever clean up) - screen going black/unclickable after
+     * tapping Close. */
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_t *overlay = lv_obj_get_parent(lv_obj_get_parent(btn));
+    lv_obj_del(overlay);
+}
+
+static void batch_info_btn_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    roast_telemetry_service_get_pending_batch_info(&s_batch_draft);
+
+    lv_obj_t *overlay = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_border_width(overlay, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(overlay, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(overlay);
+
+    /* Auto-height (LV_SIZE_CONTENT) rather than a fixed pixel height: the
+     * previous fixed 220px card was too short for its own content (title +
+     * Coffee + Origin + Weight + Notes + Close), which silently clipped the
+     * Notes field and the Close button's margin off the bottom. Safe to use
+     * LV_SIZE_CONTENT here since the card is fully built (all children
+     * added) before ever being shown - same rule as profile_editor.c's
+     * card-per-segment layout. */
+    lv_obj_t *card = lv_obj_create(overlay);
+    lv_obj_set_size(card, 300, LV_SIZE_CONTENT);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x1e1e1e), LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 8, LV_PART_MAIN);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_all(card, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(card, 8, LV_PART_MAIN);
+
+    lv_obj_t *title_lbl = lv_label_create(card);
+    lv_obj_add_style(title_lbl, &s_style_value, LV_PART_MAIN);
+    lv_label_set_text(title_lbl, "Batch Info");
+
+    char buf[160];
+
+    s_batch_coffee_label = lv_label_create(card);
+    lv_obj_add_style(s_batch_coffee_label, &s_style_label, LV_PART_MAIN);
+    snprintf(buf, sizeof(buf), "Coffee: %s", s_batch_draft.coffee_name[0] ? s_batch_draft.coffee_name : "(empty)");
+    lv_label_set_text(s_batch_coffee_label, buf);
+    lv_obj_t *coffee_btn = lv_btn_create(card);
+    lv_obj_set_size(coffee_btn, 276, 28);
+    lv_obj_add_event_cb(coffee_btn, batch_coffee_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *coffee_lbl = lv_label_create(coffee_btn);
+    lv_label_set_text(coffee_lbl, "Set Coffee Name");
+    lv_obj_center(coffee_lbl);
+
+    s_batch_origin_label = lv_label_create(card);
+    lv_obj_add_style(s_batch_origin_label, &s_style_label, LV_PART_MAIN);
+    snprintf(buf, sizeof(buf), "Origin: %s", s_batch_draft.origin[0] ? s_batch_draft.origin : "(empty)");
+    lv_label_set_text(s_batch_origin_label, buf);
+    lv_obj_t *origin_btn = lv_btn_create(card);
+    lv_obj_set_size(origin_btn, 276, 28);
+    lv_obj_add_event_cb(origin_btn, batch_origin_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *origin_lbl = lv_label_create(origin_btn);
+    lv_label_set_text(origin_lbl, "Set Origin");
+    lv_obj_center(origin_lbl);
+
+    lv_obj_t *weight_row = make_flex_row(card, 276);
+    s_batch_weight_label = lv_label_create(weight_row);
+    lv_obj_add_style(s_batch_weight_label, &s_style_label, LV_PART_MAIN);
+    batch_weight_update_label();
+    lv_obj_t *weight_btns = lv_obj_create(weight_row);
+    lv_obj_remove_style_all(weight_btns);
+    lv_obj_set_size(weight_btns, 90, 28);
+    lv_obj_clear_flag(weight_btns, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(weight_btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(weight_btns, 6, LV_PART_MAIN);
+    lv_obj_t *minus_btn = lv_btn_create(weight_btns);
+    lv_obj_set_size(minus_btn, 40, 28);
+    lv_obj_add_event_cb(minus_btn, batch_weight_minus_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *minus_lbl = lv_label_create(minus_btn);
+    lv_label_set_text(minus_lbl, LV_SYMBOL_MINUS);
+    lv_obj_center(minus_lbl);
+    lv_obj_t *plus_btn = lv_btn_create(weight_btns);
+    lv_obj_set_size(plus_btn, 40, 28);
+    lv_obj_add_event_cb(plus_btn, batch_weight_plus_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *plus_lbl = lv_label_create(plus_btn);
+    lv_label_set_text(plus_lbl, LV_SYMBOL_PLUS);
+    lv_obj_center(plus_lbl);
+
+    /* Close lives INSIDE the card (last flex child) rather than pinned to
+     * the bottom of the full-screen overlay - so the card's own bottom
+     * padding naturally gives it breathing room below, instead of sitting
+     * flush against the screen edge. */
+    lv_obj_t *close_btn = lv_btn_create(card);
+    lv_obj_set_size(close_btn, 100, 30);
+    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x616161), LV_PART_MAIN);
+    lv_obj_add_event_cb(close_btn, batch_info_overlay_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *close_lbl = lv_label_create(close_btn);
+    lv_label_set_text(close_lbl, "Close");
+    lv_obj_center(close_lbl);
+}
+
 static const char *phase_text(roast_phase_t phase)
 {
     switch (phase) {
@@ -354,6 +821,9 @@ static void start_btn_event_cb(lv_event_t *e)
             ESP_LOGW(TAG, "session_sm_start failed: %s", esp_err_to_name(err));
         } else {
             reset_chart();
+            roast_events_reset();
+            s_last_known_event_count = 0;
+            rebuild_event_markers();
             roast_telemetry_service_on_roast_started();
         }
     }
@@ -407,6 +877,35 @@ static void refresh_timer_cb(lv_timer_t *timer)
      * CHARGE), so it's deliberately excluded from the plotted curve. */
     bool curve_active = (snap.phase == ROAST_PHASE_ROASTING || snap.phase == ROAST_PHASE_DEVELOPMENT ||
                           snap.phase == ROAST_PHASE_COOLING);
+    /* Operator-reported bug: automatically-marked events (Turning Point via
+     * roast_telemetry_service.c, Cool Start via profile_curve_follower.c)
+     * happen on a DIFFERENT module's own timer/tick, with no way to also
+     * call back into this screen's rebuild_event_markers() at the moment
+     * they're marked - they used to only show up after navigating away and
+     * back (or in Roast History, which always rebuilds fresh from the
+     * recorded file). Polling the cheap count here catches it within one
+     * 500ms tick of it actually happening. */
+    if (curve_active) {
+        size_t event_count = roast_events_get_count();
+        if (event_count != s_last_known_event_count) {
+            s_last_known_event_count = event_count;
+            rebuild_event_markers();
+        }
+    }
+    if (s_mark_event_btn != NULL) {
+        if (curve_active) {
+            lv_obj_clear_flag(s_mark_event_btn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_mark_event_btn, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_batch_info_btn != NULL) {
+        if (phase_is_idle_like(snap.phase)) {
+            lv_obj_clear_flag(s_batch_info_btn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_batch_info_btn, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
     /* TBT should show during PREHEAT too (operator request: preheat now
      * actually heats toward the first setpoint's target - see
      * profile_curve_follower.c) - held flat at segment 0's target since
@@ -494,7 +993,6 @@ static void refresh_timer_cb(lv_timer_t *timer)
             if (snap.sensor_valid) {
                 lv_chart_set_value_by_id(s_chart, s_chart_bt_series, (uint16_t)idx, (lv_coord_t)snap.bean_temp_c);
             }
-            lv_chart_set_value_by_id(s_chart, s_chart_fan_series, (uint16_t)idx, (lv_coord_t)snap.fan_pct);
         }
     }
 
@@ -578,21 +1076,57 @@ void roast_dashboard_show_in(lv_obj_t *parent)
     lv_obj_set_style_pad_row(root, 6, LV_PART_MAIN);
 
     /* Header row: selected preset name (left) + Wi-Fi IP (right), per the
-     * operator's request. */
+     * operator's request. s_preset_label grows to absorb all the row's
+     * free space, so whatever follows it (Wi-Fi label + the Mark
+     * Event/Batch Info icon button, which toggle visibility depending on
+     * roast phase) always hugs the right edge as a tight group - instead of
+     * make_flex_row's plain space-between spreading 3-4 items evenly and
+     * making the Wi-Fi label visibly jump toward the middle of the row
+     * whenever an icon button's visibility changes (reported bug). */
     lv_obj_t *header_row = make_flex_row(root, content_w - 16);
+    lv_obj_set_style_pad_column(header_row, 10, LV_PART_MAIN);
     s_preset_label = lv_label_create(header_row);
     lv_obj_add_style(s_preset_label, &s_style_label, LV_PART_MAIN);
     lv_label_set_text(s_preset_label, s_has_profile ? s_active_profile.name : "No preset selected");
+    lv_obj_set_flex_grow(s_preset_label, 1);
 
     s_wifi_ip_label = lv_label_create(header_row);
     lv_obj_add_style(s_wifi_ip_label, &s_style_label, LV_PART_MAIN);
     lv_label_set_text(s_wifi_ip_label, "Wi-Fi: --");
 
-    /* Live BT+Fan timeline chart (T063), on top per the approved sketch.
-     * flex_grow=1 makes it consume all leftover vertical space. Solid lines
-     * are the actual measured values; the dashed target-curve overlays
+    /* T056: opens the event-marking overlay - only meaningful once the
+     * roast curve/timeline is actually running (ROASTING/DEVELOPMENT/
+     * COOLING), toggled alongside the button groups in refresh_timer_cb. */
+    s_mark_event_btn = lv_btn_create(header_row);
+    lv_obj_set_size(s_mark_event_btn, 44, 22);
+    lv_obj_set_style_bg_color(s_mark_event_btn, lv_color_hex(0xBA68C8), LV_PART_MAIN);
+    lv_obj_add_event_cb(s_mark_event_btn, mark_event_btn_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(s_mark_event_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *mark_event_lbl = lv_label_create(s_mark_event_btn);
+    lv_label_set_text(mark_event_lbl, LV_SYMBOL_BELL);
+    lv_obj_center(mark_event_lbl);
+
+    /* T057: opens the Batch Info form - only meaningful before/while a roast
+     * hasn't started yet (IDLE/COMPLETED/ABORTED), toggled opposite of
+     * s_mark_event_btn in refresh_timer_cb. */
+    s_batch_info_btn = lv_btn_create(header_row);
+    lv_obj_set_size(s_batch_info_btn, 44, 22);
+    lv_obj_set_style_bg_color(s_batch_info_btn, lv_color_hex(0x616161), LV_PART_MAIN);
+    lv_obj_add_event_cb(s_batch_info_btn, batch_info_btn_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *batch_info_lbl = lv_label_create(s_batch_info_btn);
+    lv_label_set_text(batch_info_lbl, LV_SYMBOL_EDIT);
+    lv_obj_center(batch_info_lbl);
+
+    /* Live BT timeline chart (T063), on top per the approved sketch.
+     * flex_grow=1 makes it consume all leftover vertical space. The solid
+     * line is the actual measured BT; the dashed target-curve overlays
      * (rebuild_target_lines(), below) are plain lv_line children of this
-     * chart since lv_chart's own line drawing ignores dash style props. */
+     * chart since lv_chart's own line drawing ignores dash style props.
+     * No solid "actual" Fan series - this hardware has no RPM sensor to
+     * independently measure it, so it would just echo whatever was last
+     * commanded (already shown by the dashed Fan target line, and the
+     * numeric Fan% readout below - a second "measured-looking" line was
+     * redundant/misleading). */
     s_chart = lv_chart_create(root);
     lv_obj_set_width(s_chart, LV_PCT(100));
     lv_obj_set_flex_grow(s_chart, 1);
@@ -606,9 +1140,8 @@ void roast_dashboard_show_in(lv_obj_t *parent)
     lv_chart_set_div_line_count(s_chart, 3, 4);
     lv_chart_set_point_count(s_chart, MAX_CHART_POINTS);
     lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 260);    /* BT: 0-260C (FR-026 absolute cutoff). */
-    lv_chart_set_range(s_chart, LV_CHART_AXIS_SECONDARY_Y, 0, 100);  /* Fan: 0-100%. */
+    lv_chart_set_range(s_chart, LV_CHART_AXIS_SECONDARY_Y, 0, 100);  /* Fan: 0-100% (still used by the dashed Fan target overlay's pixel mapping). */
     s_chart_bt_series = lv_chart_add_series(s_chart, lv_color_hex(0xFF9746), LV_CHART_AXIS_PRIMARY_Y);
-    s_chart_fan_series = lv_chart_add_series(s_chart, lv_color_hex(0x66BB6A), LV_CHART_AXIS_SECONDARY_Y);
     reset_chart();
     /* This screen (and its chart) gets torn down/rebuilt every time the
      * operator switches tabs - if a roast is already running, re-fill the
@@ -786,6 +1319,8 @@ void roast_dashboard_show_in(lv_obj_t *parent)
      * resolved until a layout pass runs). */
     lv_obj_update_layout(root);
     rebuild_target_lines();
+    rebuild_event_markers();
+    s_last_known_event_count = roast_events_get_count();
 
     /* Paint immediately instead of waiting for the first 500ms tick. */
     refresh_timer_cb(NULL);
@@ -802,7 +1337,6 @@ void roast_dashboard_hide(void)
     }
     s_chart = NULL;
     s_chart_bt_series = NULL;
-    s_chart_fan_series = NULL;
     s_target_temp_line = NULL;
     s_target_fan_line = NULL;
     /* The segment labels (children of s_chart) are already destroyed by
@@ -810,4 +1344,9 @@ void roast_dashboard_hide(void)
      * just forget our now-dangling pointers instead of calling lv_obj_del()
      * on them again next time rebuild_target_lines() runs for a new chart. */
     s_segment_label_count = 0;
+    /* Same reasoning for the event-marker lines/labels (T056/T065). */
+    s_event_marker_count = 0;
+    s_last_known_event_count = 0;
+    s_mark_event_btn = NULL;
+    s_batch_info_btn = NULL;
 }

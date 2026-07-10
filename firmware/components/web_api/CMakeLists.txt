@@ -6,6 +6,7 @@ idf_component_register(
         "history_routes.c"
         "presets_routes.c"
         "diagnostics_routes.c"
+        "ota_routes.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

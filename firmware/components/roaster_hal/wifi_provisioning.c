@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
+#include "mdns.h"
 
 #include "hal/wifi_provisioning.h"
 #include "storage/nvs_store.h"
@@ -51,6 +52,12 @@ static void try_connect_sta(const char *ssid, const char *password)
     ESP_LOGI(TAG, "Connecting to WiFi SSID '%s' as STA", ssid);
     s_state = WIFI_PROV_STATE_CONNECTING;
 
+    /* Harmless no-op if not currently associated - but needed for a clean
+     * reconfigure while ALREADY connected (operator changing networks from
+     * the web UI): esp_wifi_connect() while already associated to a
+     * different AP does not reliably tear down the old association first. */
+    esp_wifi_disconnect();
+
     wifi_config_t sta_config = {0};
     strncpy((char *)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid) - 1);
     strncpy((char *)sta_config.sta.password, password, sizeof(sta_config.sta.password) - 1);
@@ -85,6 +92,23 @@ esp_err_t wifi_provisioning_init(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_ap();
     s_sta_netif = esp_netif_create_default_wifi_sta();
+
+    /* mDNS (operator request): reachable as "http://poproaster.local/"
+     * once connected to the home network, instead of needing to know/type
+     * the device's IP. Must come AFTER esp_netif_init()/
+     * esp_event_loop_create_default() above (mdns hooks into netif IP-up/
+     * down events) and hostname must be set before any mdns_service_add()
+     * call. It reacts to the STA's own IP-up event automatically - no
+     * extra wiring needed once the operator finishes WiFi setup. */
+    esp_err_t mdns_err = mdns_init();
+    if (mdns_err != ESP_OK) {
+        ESP_LOGW(TAG, "mdns_init failed (continuing without mDNS): %s", esp_err_to_name(mdns_err));
+    } else {
+        mdns_hostname_set(WIFI_PROV_MDNS_HOSTNAME);
+        mdns_instance_name_set("Pop Roaster");
+        mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+        ESP_LOGI(TAG, "mDNS started: http://%s.local/", WIFI_PROV_MDNS_HOSTNAME);
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -146,4 +170,18 @@ esp_err_t wifi_provisioning_get_ip_str(char *out, size_t out_len)
     }
     snprintf(out, out_len, IPSTR, IP2STR(&ip_info.ip));
     return ESP_OK;
+}
+
+esp_err_t wifi_provisioning_get_ssid_str(char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out[0] = '\0';
+    return nvs_store_get_string("wifi_ssid", out, out_len);
+}
+
+esp_netif_t *wifi_provisioning_get_sta_netif(void)
+{
+    return s_sta_netif;
 }

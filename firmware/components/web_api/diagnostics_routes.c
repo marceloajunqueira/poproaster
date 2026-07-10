@@ -189,7 +189,7 @@ static esp_err_t diagnostics_get_handler(httpd_req_t *req)
                            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                            "<title>Pop Roaster - Diagnostics</title>",
                            HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, WEB_UI_STYLE, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, WEB_UI_STYLE_LINK, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, "</head><body><div class='app'>", HTTPD_RESP_USE_STRLEN);
     web_ui_send_nav_bar(req, "diagnostics");
     httpd_resp_send_chunk(req,

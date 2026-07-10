@@ -11,8 +11,10 @@
 #include "roast_core/command_dispatcher.h"
 #include "roast_core/roast_telemetry_service.h"
 #include "roast_core/roast_profile.h"
+#include "roast_core/roast_events.h"
 #include "roast_core/heater_pid.h"
 #include "storage/profile_store.h"
+#include "safety/safety_manager.h"
 #include "roast_core/profile_curve_follower.h"
 
 static const char *TAG = "profile_curve_follower";
@@ -42,6 +44,7 @@ static bool s_profile_loaded = false;
 static roast_phase_t s_last_phase = ROAST_PHASE_IDLE;
 static int64_t s_cooling_entered_at_ms = 0;
 static bool s_auto_finished = false;
+static float s_manual_target_temp_c = 0.0f;
 
 static bool s_override_active = false;
 static uint8_t s_override_segment_idx = 0;
@@ -142,16 +145,40 @@ static void drive_cooling(uint32_t elapsed_s, bool within_profile_cooling_segmen
         return;
     }
 
-    /* No profile-defined Cooling curve to follow (Manual/Artisan mode, no
-     * profile selected, or cancelled/emergency-stopped before reaching the
-     * profile's own Cooling segment) - just kick the fan to a fixed safe
-     * speed ONCE and then leave it to the operator (Manual tab) from then
-     * on, bounded only by the SAFETY_FAN_STOP_MIN_TEMP_C hard floor in
-     * safety_manager.h. */
+    /* Reached only if COOLING was somehow entered outside the profile's own
+     * Cooling segment - not expected in the current design (operator
+     * Cancel/Emergency Stop now abort immediately via session_sm_abort()
+     * instead of routing through COOLING at all), but kept as a defensive
+     * fallback: kick the fan to a fixed safe speed ONCE and then leave it
+     * to the operator (Manual tab) from then on, bounded only by the
+     * SAFETY_FAN_STOP_MIN_TEMP_C hard floor in safety_manager.h. */
     if (!s_fallback_fan_written) {
         command_dispatcher_set_fan_pct(COOLING_FALLBACK_FAN_PCT, SAFETY_CMD_SOURCE_PROFILE_CURVE);
         s_fallback_fan_written = true;
     }
+}
+
+/** Manual/Artisan mode: drives ONLY the heater, automatically, via the same
+ * closed-loop PID Profile mode uses, tracking whatever target bean
+ * temperature the operator set via profile_curve_follower_set_manual_target_temp_c()
+ * (Manual screen's "Target Temp" slider) - fan is left entirely to the
+ * operator's own Fan slider/command. Operator-reported bug: requesting
+ * heat while the fan was left off did nothing (Safety Manager's 30% floor
+ * silently rejected it) - auto-raises the fan to that floor here instead,
+ * whenever the PID actually wants to apply heat. */
+static void drive_manual_heater(void)
+{
+    roast_telemetry_snapshot_t snap;
+    roast_telemetry_service_get_snapshot(&snap);
+
+    uint8_t heater_target = heater_pid_update(s_manual_target_temp_c,
+                                               snap.sensor_valid ? snap.bean_temp_c : s_manual_target_temp_c,
+                                               FOLLOWER_PERIOD_US / 1000000.0f);
+
+    if (heater_target > 0 && snap.fan_pct < SAFETY_FAN_MIN_PCT_DURING_HEAT) {
+        command_dispatcher_set_fan_pct(SAFETY_FAN_MIN_PCT_DURING_HEAT, SAFETY_CMD_SOURCE_DISPLAY);
+    }
+    command_dispatcher_set_heater_pct(heater_target, SAFETY_CMD_SOURCE_DISPLAY);
 }
 
 static void follower_timer_cb(void *arg)
@@ -173,6 +200,10 @@ static void follower_timer_cb(void *arg)
         reset_override_tracking();
         heater_pid_reset();
         s_auto_finished = false;
+        /* Never silently inherit a stale target from a previous Manual
+         * session - the operator must set a fresh one via the Target Temp
+         * slider each time. */
+        s_manual_target_temp_c = 0.0f;
         if (session->control_mode == ROAST_MODE_PROFILE && !s_profile_loaded) {
             ESP_LOGW(TAG, "Session is in Profile mode but no profile could be loaded - curve follower idle");
         }
@@ -194,7 +225,10 @@ static void follower_timer_cb(void *arg)
 
     if (phase == ROAST_PHASE_PREHEAT) {
         if (!s_profile_loaded) {
-            return; /* Manual/Artisan preheat - operator drives fan/heater manually via the Manual tab. */
+            if (session->control_mode == ROAST_MODE_MANUAL_ARTISAN) {
+                drive_manual_heater();
+            }
+            return; /* Manual/Artisan preheat with no target set yet, or no profile could be loaded - nothing to do. */
         }
         /* Operator request: preheat should actually heat toward the first
          * setpoint's target bean temperature (not just idle with the
@@ -208,24 +242,34 @@ static void follower_timer_cb(void *arg)
 
     if (phase == ROAST_PHASE_ROASTING || phase == ROAST_PHASE_DEVELOPMENT) {
         if (!s_profile_loaded) {
-            return; /* Manual/Artisan mode - operator drives fan/heater directly, nothing to do here. */
+            if (session->control_mode == ROAST_MODE_MANUAL_ARTISAN) {
+                drive_manual_heater();
+            }
+            return; /* Manual/Artisan mode - fan is fully operator-controlled, heater is the PID above. */
         }
         uint8_t segment_idx = roast_profile_get_segment_index(&s_profile, elapsed_s);
         if (s_profile.points[segment_idx].is_cooling) {
             /* T038: the profile's own trailing Cooling segment has been
              * reached naturally - transition the session phase; the actual
              * cooling fan control happens on the NEXT tick (phase will read
-             * back as COOLING then). */
+             * back as COOLING then). Also auto-marks Cool Start - on this
+             * popcorn-popper hardware there's no separate unload/drop step
+             * (cooling starts immediately via the fan), so this single
+             * automatic marker represents "Drop" too; no manual button
+             * needed for either. */
             ESP_LOGI(TAG, "Profile curve reached its Cooling segment - auto-starting Cooling");
             session_sm_start_cooling();
+            roast_events_mark(ROAST_EVENT_COOL_START);
             return;
         }
         drive_heating_segment(elapsed_s, segment_idx);
         return;
     }
 
-    /* phase == ROAST_PHASE_COOLING (reached naturally above, or forced
-     * immediately by session_sm_cancel() - Cancel/Emergency Stop). */
+    /* phase == ROAST_PHASE_COOLING - only ever reached via the profile's own
+     * trailing Cooling segment now (T038 branch above); operator
+     * Cancel/Emergency Stop abort immediately via session_sm_abort()
+     * instead of routing through COOLING. */
     uint32_t total_s = s_profile_loaded ? roast_profile_total_duration_s(&s_profile) : 0;
     uint8_t segment_idx = (s_profile_loaded && total_s > 0) ? roast_profile_get_segment_index(&s_profile, elapsed_s) : 0;
     bool within_profile_cooling_segment =
@@ -277,6 +321,7 @@ esp_err_t profile_curve_follower_init(void)
     s_last_phase = ROAST_PHASE_IDLE;
     s_cooling_entered_at_ms = 0;
     s_auto_finished = false;
+    s_manual_target_temp_c = 0.0f;
     reset_override_tracking();
     heater_pid_reset();
 
@@ -297,4 +342,14 @@ esp_err_t profile_curve_follower_init(void)
 
     ESP_LOGI(TAG, "Profile curve follower init OK");
     return ESP_OK;
+}
+
+void profile_curve_follower_set_manual_target_temp_c(float target_c)
+{
+    s_manual_target_temp_c = target_c;
+}
+
+float profile_curve_follower_get_manual_target_temp_c(void)
+{
+    return s_manual_target_temp_c;
 }

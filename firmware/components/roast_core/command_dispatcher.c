@@ -73,15 +73,18 @@ esp_err_t command_dispatcher_emergency_stop(safety_cmd_source_t source)
     }
 
     /* Per operator requirement: Emergency Stop also cancels any active
-     * roast session, but rather than terminating it outright, this forces
-     * a safe transition into COOLING first (heater already off via
-     * safety_manager_emergency_stop() above; the fan is kept running) - see
-     * session_sm_cancel() and the SAFETY_FAN_STOP_MIN_TEMP_C rule in
-     * safety_manager.h. The session finalizes as ABORTED once
-     * profile_curve_follower.c decides cooling is done. session_sm_cancel()
-     * is a no-op (ESP_ERR_INVALID_STATE, safely ignored) if there was no
+     * roast session, immediately (no COOLING waiting period) - the
+     * dashboard reverts to "Start Roast" right away. session_sm_abort() is
+     * a no-op (ESP_ERR_INVALID_STATE, safely ignored) if there was no
      * active session to begin with. */
-    session_sm_cancel("Emergency Stop activated");
+    session_sm_abort("Emergency Stop activated");
+
+    /* Best-effort attempt to fully stop the fan too - the alarm this just
+     * raised requires acknowledgment first (safety_manager_request_fan_pct
+     * rejects ANY fan command while unacknowledged), so in practice this
+     * only takes effect after the operator acks the alarm and it's already
+     * safe to do so; harmless no-op otherwise. */
+    command_dispatcher_set_fan_pct(0, source);
 
     return err;
 }
@@ -137,15 +140,24 @@ esp_err_t command_dispatcher_confirm_charge(safety_cmd_source_t source)
 
 esp_err_t command_dispatcher_cancel_session(safety_cmd_source_t source)
 {
-    /* Rather than terminating outright, this forces a safe transition into
-     * COOLING (fan kept running) - see session_sm_cancel() and the
-     * SAFETY_FAN_STOP_MIN_TEMP_C rule in safety_manager.h. The session
-     * finalizes as ABORTED once profile_curve_follower.c decides cooling
-     * is done. */
-    esp_err_t err = session_sm_cancel("Cancelled by operator");
+    /* Operator feedback: Cancel must actually stop the session right away
+     * (dashboard shows "Start Roast" again immediately), not sit showing
+     * "Cooling" indefinitely - session_sm_abort() transitions straight to
+     * the terminal ABORTED phase (heater already forced off as part of
+     * that). */
+    esp_err_t err = session_sm_abort("Cancelled by operator");
     if (err == ESP_OK) {
         s_last_applied_source = source;
     }
+
+    /* Best-effort attempt to also fully stop the fan - safety_manager's
+     * existing SAFETY_FAN_STOP_MIN_TEMP_C rule rejects this (leaving the
+     * fan running at its last commanded speed) while BT is still >=100C or
+     * the sensor is invalid, so the chamber keeps getting safely cooled by
+     * airflow even though the session/UI already looks idle again; once
+     * it's actually safe, this succeeds and the fan turns off. */
+    command_dispatcher_set_fan_pct(0, source);
+
     return err;
 }
 

@@ -42,6 +42,9 @@ void nav_shell_register_tab(nav_shell_tab_t tab, const char *label,
  * `initial_tab`. Call once at boot, after all tabs have been registered. */
 esp_err_t nav_shell_init(nav_shell_tab_t initial_tab);
 
+/** T055: re-renders every tab's sidebar label from the current i18n language - call right after i18n_set_language(). */
+void nav_shell_refresh_labels(void);
+
 #ifdef __cplusplus
 }
 #endif

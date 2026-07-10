@@ -70,26 +70,23 @@ esp_err_t session_sm_confirm_charge(void);
 /** Transitions to COOLING (automatically via the profile's own trailing "Cooling" segment(s), see profile_curve_follower.c - there is no manual "Start Cooling" button). */
 esp_err_t session_sm_start_cooling(void);
 
+/** Finalizes a session that has finished COOLING: always COMPLETED. Called automatically by profile_curve_follower.c once cooling's exit condition is met (profile timeline elapsed, BT below the safe threshold, or a failsafe max duration) - there is no manual "Complete" button. Since operator Cancel/Emergency Stop now abort immediately via session_sm_abort() instead of waiting through COOLING, the only way a session ever reaches COOLING naturally is the profile's own trailing Cooling segment - so this always means a normal finish. */
+esp_err_t session_sm_complete(void);
+
 /**
  * Operator-initiated cancellation (Cancel button) or Emergency Stop of an
- * active roast: rather than terminating immediately, this forces an
- * immediate transition into COOLING (heater off, fan kept running) so the
- * heating element/chamber cools down safely instead of being abruptly cut
- * with the fan potentially still needed - see the new
- * SAFETY_FAN_STOP_MIN_TEMP_C rule in safety_manager.h. The session is
- * marked to finish as ABORTED (with `reason`) instead of COMPLETED once
- * cooling naturally ends (profile_curve_follower.c decides when that is:
- * profile timeline elapsed, BT below the safe threshold, or a failsafe max
- * duration). If the session is already in COOLING, this just marks the
- * pending outcome as ABORTED without changing the phase again. Returns
- * ESP_ERR_INVALID_STATE if there's no active session (already
- * IDLE/COMPLETED/ABORTED).
+ * active roast: immediately transitions to ABORTED (heater forced off,
+ * same as any other terminal transition) so the dashboard shows "Start
+ * Roast" again right away - it does NOT wait through a COOLING grace
+ * period. The fan is deliberately left untouched here (whatever it was
+ * last commanded to); callers are expected to also attempt a fan-off
+ * request afterward (see command_dispatcher_cancel_session()) - the
+ * existing SAFETY_FAN_STOP_MIN_TEMP_C rule in safety_manager.h will reject
+ * that fan-off request (leaving the fan running) while BT is still >=100C
+ * or the sensor is invalid, so the chamber still gets safely cooled by
+ * airflow even though the session itself already looks idle. Returns
+ * ESP_ERR_INVALID_STATE if there's no active session (already IDLE).
  */
-esp_err_t session_sm_cancel(const char *reason);
-
-/** Finalizes a session that has finished COOLING: COMPLETED normally, or ABORTED (with the reason passed to session_sm_cancel()) if a cancellation/emergency-stop was requested during the roast. Called automatically by profile_curve_follower.c once cooling's exit condition is met - there is no manual "Complete" button. */
-esp_err_t session_sm_complete(void);
-/** Immediate hard abort with no cooling grace period - reserved for unrecoverable failures needing an instant stop; operator Cancel/Emergency Stop use session_sm_cancel() instead. */
 esp_err_t session_sm_abort(const char *reason);
 
 /**

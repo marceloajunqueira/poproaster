@@ -105,6 +105,11 @@ static esp_err_t wifi_status_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    char ssid[33] = {0};
+    wifi_provisioning_get_ssid_str(ssid, sizeof(ssid));
+    char ip_buf[24] = "not connected";
+    wifi_provisioning_get_ip_str(ip_buf, sizeof(ip_buf));
+
     httpd_resp_set_type(req, "text/html");
     web_ui_enable_low_latency(req);
     httpd_resp_send_chunk(req,
@@ -112,13 +117,38 @@ static esp_err_t wifi_status_get_handler(httpd_req_t *req)
                            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                            "<title>Pop Roaster - Wi-Fi</title>",
                            HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, WEB_UI_STYLE, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, WEB_UI_STYLE_LINK, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, "</head><body><div class='app'>", HTTPD_RESP_USE_STRLEN);
     web_ui_send_nav_bar(req, "wifi");
+
+    char buf[384];
+    snprintf(buf, sizeof(buf),
+             "<main class='content'><div class='card'><h1>Wi-Fi</h1>"
+             "<div class='row'><span class='name'>Status</span><span class='value'>Connected</span></div>"
+             "<div class='row'><span class='name'>Network</span><span class='value'>%s</span></div>"
+             "<div class='row'><span class='name'>IP address</span><span class='value'>%s</span></div>"
+             "</div>",
+             ssid[0] ? ssid : "?", ip_buf);
+    httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
+
+    /* Reconfigure form - always available, even while already connected, so
+     * the operator can switch networks (e.g. moved the roaster, changed
+     * router) without needing to factory-reset or use the AP portal. */
     httpd_resp_send_chunk(req,
-                           "<main class='content'><div class='card'><h1>Wi-Fi</h1>"
-                           "<div class='row'><span class='name'>Status</span><span class='value'>Connected</span></div>"
-                           "</div></main></div></body></html>",
+                           "<div class='card'><h1>Change Network</h1>"
+                           "<p class='sub'>Saving new credentials disconnects from the current network and "
+                           "reconnects to the one below. If it fails, the device falls back to its own "
+                           "PopRoaster-Setup access point.</p>"
+                           "<form method='POST' action='/api/wifi/configure'>"
+                           "<label style='color:var(--muted);font-size:13px;display:block;margin:12px 0 4px'>SSID</label>"
+                           "<input type='text' name='ssid' maxlength='32' required style='width:100%;padding:8px;"
+                           "border-radius:4px;border:1px solid #333;background:#2a2a2a;color:var(--on-surface);font-size:14px'>"
+                           "<label style='color:var(--muted);font-size:13px;display:block;margin:12px 0 4px'>Password</label>"
+                           "<input type='password' name='password' maxlength='64' style='width:100%;padding:8px;"
+                           "border-radius:4px;border:1px solid #333;background:#2a2a2a;color:var(--on-surface);font-size:14px'>"
+                           "<div class='btnrow'><button type='submit' class='primary'>Connect</button></div>"
+                           "</form></div>"
+                           "</main></div></body></html>",
                            HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;

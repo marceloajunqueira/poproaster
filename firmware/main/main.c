@@ -23,6 +23,7 @@
 #include "hal/fan_pwm.h"
 #include "hal/wifi_provisioning.h"
 #include "hal/touch_driver.h"
+#include "hal/ota_manager.h"
 #include "safety/safety_manager.h"
 #include "safety/duration_watchdog.h"
 #include "safety/fan_failure_detector.h"
@@ -32,6 +33,7 @@
 #include "roast_core/profile_curve_follower.h"
 #include "roast_core/session_recovery.h"
 #include "web_api/server.h"
+#include "artisan_adapter/artisan_bridge.h"
 #include "ui_display/i18n.h"
 #include "ui_display/display_panel.h"
 #include "ui_display/widgets/nav_shell.h"
@@ -39,17 +41,11 @@
 #include "ui_display/screens/manual_control.h"
 #include "ui_display/screens/profile_list.h"
 #include "ui_display/screens/session_review.h"
-#include "ui_display/screens/placeholder_screen.h"
+#include "ui_display/screens/settings_hub.h"
 
-/* TODO(T047): #include "artisan_adapter/artisan_bridge.h" once the Artisan bridge is implemented. */
 
 static const char *TAG = "pop_roaster_main";
 
-static void config_tab_show(lv_obj_t *parent)
-{
-    placeholder_screen_show_in(parent, "Config",
-        "Language switch, sensor calibration, peripheral tests and Wi-Fi setup will be consolidated here (FR-046).");
-}
 
 void app_main(void)
 {
@@ -99,12 +95,18 @@ void app_main(void)
     nav_shell_register_tab(NAV_SHELL_TAB_PRESETS, LV_SYMBOL_LIST "\nPresets", profile_list_show_in, NULL);
     nav_shell_register_tab(NAV_SHELL_TAB_MANUAL, LV_SYMBOL_TINT "\nManual", manual_control_show_in, manual_control_hide);
     nav_shell_register_tab(NAV_SHELL_TAB_HISTORY, LV_SYMBOL_DIRECTORY "\nHistory", session_review_show_in, NULL);
-    nav_shell_register_tab(NAV_SHELL_TAB_CONFIG, LV_SYMBOL_SETTINGS "\nConfig", config_tab_show, NULL);
+    nav_shell_register_tab(NAV_SHELL_TAB_CONFIG, LV_SYMBOL_SETTINGS "\nConfig", settings_hub_show_in, settings_hub_hide);
     ESP_ERROR_CHECK(nav_shell_init(NAV_SHELL_TAB_ROAST));
 
     ESP_ERROR_CHECK(wifi_provisioning_init());
     ESP_ERROR_CHECK(web_api_server_init());
-    /* TODO(T047): ESP_ERROR_CHECK(artisan_bridge_init()); once the Artisan bridge is implemented. */
+    ESP_ERROR_CHECK(artisan_bridge_init());
+
+    /* T053: confirm this boot is healthy (core subsystems + web server all
+     * came up) before cancelling any pending OTA rollback - if this line
+     * is never reached (crash-loop right after an update), the bootloader
+     * auto-reverts to the previous known-good partition on its own. */
+    ESP_ERROR_CHECK(ota_manager_init());
 
     /* FR-022: attempt to resume a roast that was active before a power loss. */
     ESP_ERROR_CHECK(session_recovery_try_resume());

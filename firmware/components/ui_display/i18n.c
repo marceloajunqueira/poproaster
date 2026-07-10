@@ -23,6 +23,16 @@ static const char *const kStringsEn[I18N_KEY_COUNT] = {
     [I18N_KEY_RESUME] = "Resume",
     [I18N_KEY_EMERGENCY_STOP] = "EMERGENCY STOP",
     [I18N_KEY_ALARM_ACKNOWLEDGE] = "Acknowledge Alarm",
+    [I18N_KEY_NAV_ROAST] = "Roast",
+    [I18N_KEY_NAV_MANUAL] = "Manual",
+    [I18N_KEY_NAV_PRESETS] = "Presets",
+    [I18N_KEY_NAV_HISTORY] = "History",
+    [I18N_KEY_NAV_CONFIG] = "Config",
+    [I18N_KEY_CONFIG_TITLE] = "Config",
+    [I18N_KEY_PERIPHERAL_TEST] = "Peripheral Test",
+    [I18N_KEY_SENSOR_CALIBRATION] = "Sensor Calibration",
+    [I18N_KEY_WIFI_SETUP] = "Wi-Fi Setup",
+    [I18N_KEY_LANGUAGE] = "Language",
 };
 
 static const char *const kStringsPt[I18N_KEY_COUNT] = {
@@ -33,6 +43,16 @@ static const char *const kStringsPt[I18N_KEY_COUNT] = {
     [I18N_KEY_RESUME] = "Retomar",
     [I18N_KEY_EMERGENCY_STOP] = "PARADA DE EMERGENCIA",
     [I18N_KEY_ALARM_ACKNOWLEDGE] = "Reconhecer Alarme",
+    [I18N_KEY_NAV_ROAST] = "Torra",
+    [I18N_KEY_NAV_MANUAL] = "Manual",
+    [I18N_KEY_NAV_PRESETS] = "Perfis",
+    [I18N_KEY_NAV_HISTORY] = "Historico",
+    [I18N_KEY_NAV_CONFIG] = "Config",
+    [I18N_KEY_CONFIG_TITLE] = "Configuracoes",
+    [I18N_KEY_PERIPHERAL_TEST] = "Teste de Perifericos",
+    [I18N_KEY_SENSOR_CALIBRATION] = "Calibracao do Sensor",
+    [I18N_KEY_WIFI_SETUP] = "Configurar Wi-Fi",
+    [I18N_KEY_LANGUAGE] = "Idioma",
 };
 
 static const char *const kStringsEs[I18N_KEY_COUNT] = {
@@ -43,6 +63,16 @@ static const char *const kStringsEs[I18N_KEY_COUNT] = {
     [I18N_KEY_RESUME] = "Reanudar",
     [I18N_KEY_EMERGENCY_STOP] = "PARADA DE EMERGENCIA",
     [I18N_KEY_ALARM_ACKNOWLEDGE] = "Reconocer Alarma",
+    [I18N_KEY_NAV_ROAST] = "Tueste",
+    [I18N_KEY_NAV_MANUAL] = "Manual",
+    [I18N_KEY_NAV_PRESETS] = "Perfiles",
+    [I18N_KEY_NAV_HISTORY] = "Historial",
+    [I18N_KEY_NAV_CONFIG] = "Config",
+    [I18N_KEY_CONFIG_TITLE] = "Configuracion",
+    [I18N_KEY_PERIPHERAL_TEST] = "Prueba de Perifericos",
+    [I18N_KEY_SENSOR_CALIBRATION] = "Calibracion del Sensor",
+    [I18N_KEY_WIFI_SETUP] = "Configurar Wi-Fi",
+    [I18N_KEY_LANGUAGE] = "Idioma",
 };
 
 esp_err_t i18n_init(void)
@@ -82,5 +112,15 @@ const char *i18n_get(i18n_key_t key)
         case I18N_LANG_ES: return kStringsEs[key];
         case I18N_LANG_EN:
         default: return kStringsEn[key];
+    }
+}
+
+const char *i18n_get_language_code(i18n_lang_t lang)
+{
+    switch (lang) {
+        case I18N_LANG_PT: return "PT";
+        case I18N_LANG_ES: return "ES";
+        case I18N_LANG_EN:
+        default: return "EN";
     }
 }

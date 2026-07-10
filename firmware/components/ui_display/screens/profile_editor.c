@@ -137,6 +137,7 @@ static void save_btn_event_cb(lv_event_t *e)
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
         return;
     }
+    roast_profile_ensure_trailing_cooling(&s_working); /* Defensive - should already conform. */
     esp_err_t err;
     if (s_editing_id < 0) {
         int new_id = -1;
@@ -171,12 +172,20 @@ static void add_segment_cb(lv_event_t *e)
         ESP_LOGW(TAG, "Cannot add another segment - already at the max (%d)", ROAST_PROFILE_MAX_POINTS);
         return;
     }
-    /* Clone the last segment's values as a reasonable starting point for the new one. */
+    /* Per operator requirement: Cooling is always the mandatory LAST
+     * segment now - a newly-added segment must go BEFORE it, never after.
+     * Clone the last HEATING segment's values (index point_count-2, i.e.
+     * the one right before Cooling) as a reasonable starting point for the
+     * new one, since cloning the Cooling segment itself would just copy
+     * its fixed 0C/100% values into a new "heating" segment. */
     roast_profile_point_t new_pt = { .duration_s = 60, .target_temp_c = 200.0f, .target_fan_pct = 60, .is_cooling = false };
-    if (s_working.point_count > 0) {
-        new_pt = s_working.points[s_working.point_count - 1];
+    if (s_working.point_count >= 2) {
+        new_pt = s_working.points[s_working.point_count - 2];
+        new_pt.is_cooling = false;
     }
-    s_working.points[s_working.point_count] = new_pt;
+    uint8_t insert_at = (uint8_t)(s_working.point_count - 1); /* Right before the trailing Cooling segment. */
+    s_working.points[s_working.point_count] = s_working.points[insert_at];
+    s_working.points[insert_at] = new_pt;
     s_working.point_count++;
     rebuild_editor_ui();
 }
@@ -186,33 +195,19 @@ static void delete_segment_cb(lv_event_t *e)
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
         return;
     }
-    if (s_working.point_count <= 1) {
-        ESP_LOGW(TAG, "Cannot delete the last remaining segment - a profile needs at least one");
+    uint8_t idx = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+    if (idx == s_working.point_count - 1) {
+        ESP_LOGW(TAG, "Cannot delete the mandatory trailing Cooling segment");
         return;
     }
-    uint8_t idx = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+    if (s_working.point_count <= 2) {
+        ESP_LOGW(TAG, "Cannot delete the last remaining heating segment - a profile needs at least one, plus Cooling");
+        return;
+    }
     for (uint8_t i = idx; i < s_working.point_count - 1; i++) {
         s_working.points[i] = s_working.points[i + 1];
     }
     s_working.point_count--;
-    rebuild_editor_ui();
-}
-
-static void toggle_cooling_cb(lv_event_t *e)
-{
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
-        return;
-    }
-    uint8_t idx = (uint8_t)(intptr_t)lv_event_get_user_data(e);
-    roast_profile_point_t *pt = &s_working.points[idx];
-    pt->is_cooling = !pt->is_cooling;
-    if (pt->is_cooling) {
-        /* Cooling always uses these two fixed values (not operator-editable -
-         * see roast_profile.h) - temperature target is irrelevant once the
-         * heater is forced off, and full fan speed cools fastest/safest. */
-        pt->target_temp_c = ROAST_PROFILE_COOLING_TEMP_C;
-        pt->target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT;
-    }
     rebuild_editor_ui();
 }
 
@@ -399,23 +394,18 @@ static void build_segment_card(lv_obj_t *parent, uint8_t idx, lv_coord_t width)
     snprintf(title_buf, sizeof(title_buf), "Seg %d%s", idx + 1, pt->is_cooling ? " (Cooling)" : "");
     lv_label_set_text(title_lbl, title_buf);
 
-    lv_obj_t *cool_btn = lv_btn_create(row_a);
-    lv_obj_add_style(cool_btn, pt->is_cooling ? &s_style_btn_primary : &s_style_btn_secondary, LV_PART_MAIN);
-    lv_obj_set_size(cool_btn, 76, 22);
-    lv_obj_add_event_cb(cool_btn, toggle_cooling_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
-    lv_obj_t *cool_lbl = lv_label_create(cool_btn);
-    lv_obj_add_style(cool_lbl, &s_style_btn_label, LV_PART_MAIN);
-    lv_label_set_text(cool_lbl, pt->is_cooling ? "Cooling" : "Heating");
-    lv_obj_center(cool_lbl);
-
-    lv_obj_t *del_btn = lv_btn_create(row_a);
-    lv_obj_add_style(del_btn, &s_style_btn_danger, LV_PART_MAIN);
-    lv_obj_set_size(del_btn, 26, 22);
-    lv_obj_add_event_cb(del_btn, delete_segment_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
-    lv_obj_t *del_lbl = lv_label_create(del_btn);
-    lv_obj_add_style(del_lbl, &s_style_btn_label, LV_PART_MAIN);
-    lv_label_set_text(del_lbl, LV_SYMBOL_TRASH);
-    lv_obj_center(del_lbl);
+    /* Cooling is always the mandatory LAST segment now (no per-segment
+     * toggle, no delete) - only heating segments get a Delete button. */
+    if (!pt->is_cooling) {
+        lv_obj_t *del_btn = lv_btn_create(row_a);
+        lv_obj_add_style(del_btn, &s_style_btn_danger, LV_PART_MAIN);
+        lv_obj_set_size(del_btn, 26, 22);
+        lv_obj_add_event_cb(del_btn, delete_segment_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
+        lv_obj_t *del_lbl = lv_label_create(del_btn);
+        lv_obj_add_style(del_lbl, &s_style_btn_label, LV_PART_MAIN);
+        lv_label_set_text(del_lbl, LV_SYMBOL_TRASH);
+        lv_obj_center(del_lbl);
+    }
 
     lv_obj_t *row_b = lv_obj_create(card);
     lv_obj_remove_style_all(row_b);
@@ -544,6 +534,12 @@ void profile_editor_show_in(lv_obj_t *parent, int profile_id)
             .duration_s = 60, .target_temp_c = 200.0f, .target_fan_pct = 60, .is_cooling = false
         };
     }
+    /* Per operator requirement: Cooling is always exactly the last segment -
+     * normalizes newly-seeded profiles (adds the default trailing Cooling
+     * segment) and any legacy/imported profile that doesn't already
+     * conform (e.g. an old profile with Cooling somewhere else, or none at
+     * all). */
+    roast_profile_ensure_trailing_cooling(&s_working);
 
     ESP_LOGI(TAG, "Profile editor shown (id=%d, name='%s')", s_editing_id, s_working.name);
     rebuild_editor_ui();

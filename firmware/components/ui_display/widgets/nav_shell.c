@@ -8,6 +8,7 @@
 #include "roast_core/command_dispatcher.h"
 #include "roast_core/session_state_machine.h"
 #include "safety/safety_manager.h"
+#include "ui_display/i18n.h"
 #include "ui_display/widgets/nav_shell.h"
 
 static const char *TAG = "nav_shell";
@@ -284,6 +285,43 @@ void nav_shell_register_tab(nav_shell_tab_t tab, const char *label,
     s_tabs[tab].hide_fn = hide_fn;
 }
 
+/* T055: known tabs render their sidebar text from the i18n catalog (so the
+ * language switch in settings_hub.c takes effect immediately, matching
+ * FR-038/quickstart.md Cenario 8) instead of the literal string main.c
+ * registered - the icon glyph (LV_SYMBOL_*) stays fixed since it's not
+ * translatable text. Falls back to the originally registered `fallback`
+ * string for any tab not in this table (defensive - keeps this file usable
+ * even if a future tab is added here without an i18n entry yet). */
+static const char *build_tab_label_text(nav_shell_tab_t tab, const char *fallback, char *out, size_t out_len)
+{
+    const char *icon;
+    i18n_key_t key;
+    switch (tab) {
+    case NAV_SHELL_TAB_ROAST:   icon = LV_SYMBOL_PLAY;      key = I18N_KEY_NAV_ROAST;   break;
+    case NAV_SHELL_TAB_MANUAL:  icon = LV_SYMBOL_TINT;      key = I18N_KEY_NAV_MANUAL;  break;
+    case NAV_SHELL_TAB_PRESETS: icon = LV_SYMBOL_LIST;      key = I18N_KEY_NAV_PRESETS; break;
+    case NAV_SHELL_TAB_HISTORY: icon = LV_SYMBOL_DIRECTORY; key = I18N_KEY_NAV_HISTORY; break;
+    case NAV_SHELL_TAB_CONFIG:  icon = LV_SYMBOL_SETTINGS;  key = I18N_KEY_NAV_CONFIG;  break;
+    default: return fallback;
+    }
+    snprintf(out, out_len, "%s\n%s", icon, i18n_get(key));
+    return out;
+}
+
+/** Re-renders every registered tab's sidebar label from the current
+ * language - called by settings_hub.c right after i18n_set_language(). */
+void nav_shell_refresh_labels(void)
+{
+    for (int i = 0; i < NAV_SHELL_TAB_COUNT; i++) {
+        nav_tab_entry_t *tab = &s_tabs[i];
+        if (tab->item_label == NULL) {
+            continue;
+        }
+        char label_buf[32];
+        lv_label_set_text(tab->item_label, build_tab_label_text((nav_shell_tab_t)i, tab->label, label_buf, sizeof(label_buf)));
+    }
+}
+
 esp_err_t nav_shell_init(nav_shell_tab_t initial_tab)
 {
     if (!lvgl_port_lock(0)) {
@@ -326,7 +364,8 @@ esp_err_t nav_shell_init(nav_shell_tab_t initial_tab)
 
         lv_obj_t *lbl = lv_label_create(item);
         lv_obj_add_style(lbl, &s_style_item_label_inactive, LV_PART_MAIN);
-        lv_label_set_text(lbl, tab->label);
+        char label_buf[32];
+        lv_label_set_text(lbl, build_tab_label_text(i, tab->label, label_buf, sizeof(label_buf)));
         lv_obj_center(lbl);
         tab->item = item;
         tab->item_label = lbl;

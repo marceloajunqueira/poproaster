@@ -13,6 +13,7 @@
 #include "roast_core/session_state_machine.h"
 #include "roast_core/command_dispatcher.h"
 #include "roast_core/roast_telemetry_service.h"
+#include "roast_core/roast_events.h"
 #include "storage/profile_store.h"
 #include "safety/safety_manager.h"
 
@@ -20,7 +21,11 @@ static const char *TAG = "dashboard_routes";
 
 #define MAX_WS_CLIENTS 4
 #define CONTROL_BODY_MAX_LEN 128
-#define WS_BROADCAST_PERIOD_US (1000 * 1000) /* 1s - matches the display's own refresh cadence. */
+#define WS_BROADCAST_PERIOD_US (500 * 1000) /* 500ms (2Hz) - T059: matches the telemetry
+                                              * service's own sample rate and the on-device
+                                              * dashboard's lv_timer refresh cadence, so web
+                                              * clients see updates just as often as the
+                                              * physical display (within the 2-5Hz target). */
 
 static httpd_handle_t s_server_handle;
 static int s_ws_fds[MAX_WS_CLIENTS];
@@ -36,6 +41,19 @@ void web_ui_enable_low_latency(httpd_req_t *req)
     if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) != 0) {
         ESP_LOGD(TAG, "setsockopt(TCP_NODELAY) failed for fd=%d", fd);
     }
+}
+
+/* Serves the shared stylesheet on its own cacheable route instead of every
+ * page re-sending it inline (see WEB_UI_STYLE_LINK doc comment) - this was
+ * a major contributor to the web UI feeling slow to navigate: several KB of
+ * identical CSS text no longer needs to be re-transferred on every single
+ * page load once the browser has cached it once. */
+static esp_err_t style_css_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/css");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+    httpd_resp_send(req, WEB_UI_STYLE, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
 }
 
 void web_ui_send_nav_bar(httpd_req_t *req, const char *active_page)
@@ -66,7 +84,66 @@ void web_ui_send_nav_bar(httpd_req_t *req, const char *active_page)
                                ? "<a class='active' href='/diagnostics'><span class='navicon'>&#128202;</span><span>Diagnostics</span></a>"
                                : "<a href='/diagnostics'><span class='navicon'>&#128202;</span><span>Diagnostics</span></a>",
                            HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req,
+                           strcmp(active_page, "ota") == 0
+                               ? "<a class='active' href='/ota'><span class='navicon'>&#8593;</span><span>Firmware Update</span></a>"
+                               : "<a href='/ota'><span class='navicon'>&#8593;</span><span>Firmware Update</span></a>",
+                           HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, "</nav>", HTTPD_RESP_USE_STRLEN);
+}
+
+/* Operator-reported bug: opening/refreshing the dashboard mid-roast only
+ * ever showed telemetry broadcast AFTER the page connected - all points
+ * recorded before that were lost, since the chart's btData array always
+ * starts out empty (all-null) and only fills in as new WebSocket messages
+ * arrive. Fix: this endpoint returns whatever's ALREADY been recorded for
+ * the currently-active session, so the page's own JS can backfill the
+ * chart once at load time. Returns a JSON array of [t_ms, bt] pairs (empty
+ * array if no roast is currently being recorded).
+ *
+ * IMPORTANT (2nd revision): this used to re-read/re-parse the session's
+ * WHOLE .jsonl telemetry file (two passes: one to count lines, one to
+ * emit a downsampled subset) on every single page load/refresh. That was
+ * still too slow on a long-enough roast - the single httpd worker task
+ * could stall badly enough that a mid-roast refresh stopped responding
+ * entirely ("nao abriu mais"). Replaced with
+ * roast_telemetry_service_get_live_chart_points(): a small, BOUNDED,
+ * IN-RAM buffer (one point appended roughly every 10s during an active
+ * roast - see LIVE_CHART_SAMPLE_PERIOD_MS/LIVE_CHART_MAX_POINTS in
+ * roast_telemetry_service.h) that this handler just copies out. No file
+ * I/O at all in this request path anymore - fast and safe (can't hang)
+ * regardless of roast length; the full-resolution .jsonl recording still
+ * happens as always, just isn't what THIS endpoint reads from. */
+static esp_err_t live_history_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    web_ui_enable_low_latency(req);
+
+    static live_chart_point_t points[LIVE_CHART_MAX_POINTS];
+    size_t n = roast_telemetry_service_get_live_chart_points(points, LIVE_CHART_MAX_POINTS);
+
+    /* Also backfill event markers (Turning Point/FC/SC/Cool Start) - same
+     * in-RAM roast_events_get_all() source the WS broadcast uses, so a
+     * page opened/refreshed mid-roast sees markers already placed, not
+     * just ones marked AFTER it (re)connects. */
+    roast_event_record_t events[ROAST_EVENTS_MAX];
+    size_t event_count = roast_events_get_all(events, ROAST_EVENTS_MAX);
+
+    static char buf[LIVE_CHART_MAX_POINTS * 24 + ROAST_EVENTS_MAX * 20 + 32];
+    size_t len = 0;
+    len += snprintf(buf + len, sizeof(buf) - len, "{\"pts\":[");
+    for (size_t i = 0; i < n; i++) {
+        len += snprintf(buf + len, sizeof(buf) - len, "%s[%lld,%.1f]", i == 0 ? "" : ",",
+                         (long long)points[i].elapsed_ms, (double)points[i].bean_temp_c);
+    }
+    len += snprintf(buf + len, sizeof(buf) - len, "],\"events\":[");
+    for (size_t i = 0; i < event_count; i++) {
+        len += snprintf(buf + len, sizeof(buf) - len, "%s[%lld,%d]", i == 0 ? "" : ",",
+                         (long long)events[i].elapsed_ms, (int)events[i].type);
+    }
+    len += snprintf(buf + len, sizeof(buf) - len, "]}");
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
 }
 
 static const char *phase_str(roast_phase_t phase)
@@ -226,17 +303,33 @@ static void ws_broadcast_timer_cb(void *arg)
     snprintf(segs + segs_len, sizeof(segs) - segs_len, "]");
     uint32_t duration_s = has_profile ? roast_profile_total_duration_s(&profile) : 0;
 
-    static char json[1300];
+    /* Marked-event markers (Turning Point/FC/SC/Cool Start) for the web
+     * chart's vertical dashed reference lines - mirrors the on-device
+     * dashboard's rebuild_event_markers(). roast_events_get_all() is a
+     * cheap in-RAM copy (max ROAST_EVENTS_MAX=16 entries), sent on every
+     * tick same as `segs` above so a newly-marked event (manual or
+     * automatic) shows up on the web chart within one broadcast period. */
+    roast_event_record_t events[ROAST_EVENTS_MAX];
+    size_t event_count = roast_events_get_all(events, ROAST_EVENTS_MAX);
+    static char events_json[420];
+    int events_len = snprintf(events_json, sizeof(events_json), "[");
+    for (size_t i = 0; i < event_count && events_len < (int)sizeof(events_json) - 24; i++) {
+        events_len += snprintf(events_json + events_len, sizeof(events_json) - events_len, "%s[%lld,%d]",
+                                i == 0 ? "" : ",", (long long)events[i].elapsed_ms, (int)events[i].type);
+    }
+    snprintf(events_json + events_len, sizeof(events_json) - events_len, "]");
+
+    static char json[2200]; /* generous margin above segs(900)+events_json(420)+everything else - see the format-truncation lesson elsewhere in this project */
     snprintf(json, sizeof(json),
              "{\"phase\":\"%s\",\"mode\":\"%s\",\"paused\":%s,\"elapsedMs\":%lld,"
              "\"bt\":%.1f,\"sensorValid\":%s,\"ror\":%.1f,\"dtr\":%.1f,\"fan\":%d,\"heater\":%d,"
-             "\"hasTarget\":%s,\"ttemp\":%.1f,\"tfan\":%d,\"segs\":%s,\"durS\":%lu,"
+             "\"hasTarget\":%s,\"ttemp\":%.1f,\"tfan\":%d,\"segs\":%s,\"durS\":%lu,\"events\":%s,"
              "\"alarmText\":\"%s\",\"alarmNeedsAck\":%s}",
              phase_str(snap.phase), session->control_mode == ROAST_MODE_PROFILE ? "PROFILE" : "MANUAL",
              snap.paused ? "true" : "false", (long long)snap.elapsed_ms,
              snap.bean_temp_c, snap.sensor_valid ? "true" : "false", snap.ror_c_per_min, snap.dtr_pct,
              snap.fan_pct, snap.heater_pct, has_target ? "true" : "false", ttemp, tfan, segs,
-             (unsigned long)duration_s, needs_ack ? alarm_str(alarm) : "", needs_ack ? "true" : "false");
+             (unsigned long)duration_s, events_json, needs_ack ? alarm_str(alarm) : "", needs_ack ? "true" : "false");
 
     httpd_ws_frame_t frame;
     memset(&frame, 0, sizeof(frame));
@@ -375,16 +468,21 @@ static const char *DASHBOARD_SCRIPT =
      * window: the dashed target curve is computed ONCE from
      * profileSegments/profileDurationS (embedded by
      * send_profile_curve_script(), see dashboard_routes.c) and shows the
-     * complete preset immediately, while the solid actual-value arrays
-     * start all-null and fill in index-by-index (idx = elapsedS *
-     * (MAXPTS-1) / durationS) as telemetry arrives during the roast. */
+     * complete preset immediately, while the solid actual-BT array starts
+     * all-null and fills in index-by-index (idx = elapsedS *
+     * (MAXPTS-1) / durationS) as telemetry arrives during the roast.
+     * There's no solid "actual" Fan line - this hardware has no RPM sensor
+     * to independently measure it, so fanData would just be an echo of
+     * whatever was last commanded (already shown by the dashed Fan target
+     * line, and redundant/misleading as a second "measured" line). */
     "var MAXPTS=150;"
     "var durationS=(typeof profileDurationS!=='undefined'&&profileDurationS>0)?profileDurationS:1200;"
     "var lastSegsJson='';"
     "var btData=new Array(MAXPTS).fill(null);"
-    "var fanData=new Array(MAXPTS).fill(null);"
     "var ttempData=new Array(MAXPTS).fill(null);"
     "var tfanData=new Array(MAXPTS).fill(null);"
+    "var eventMarkers=[];"
+    "var EVENT_LABELS=['TP','FCs','FCe','SCs','SCe','Cool'];"
     "function computeTargetCurve(){"
     "if(typeof profileSegments==='undefined'||profileSegments.length===0){"
     "for(var i=0;i<MAXPTS;i++){ttempData[i]=null;tfanData[i]=null;}return;}"
@@ -400,12 +498,26 @@ static const char *DASHBOARD_SCRIPT =
     "function fmtTime(ms){var s=Math.floor(ms/1000);var m=Math.floor(s/60);s=s%60;"
     "return (m<10?'0':'')+m+':'+(s<10?'0':'')+s;}"
     "function setText(id,t){var el=document.getElementById(id);if(el)el.textContent=t;}"
+    /* PAD_TOP/PAD_BOTTOM keep the plotted line from touching the canvas
+     * edges (operator-reported: "nao tem margem em cima e embaixo, a linha
+     * fica colada"). mapY() is the single source of truth for value->pixel
+     * mapping so plot()/drawSegmentLabels()/drawEventMarkers() all agree. */
+    "var PAD_TOP=14,PAD_BOTTOM=14;"
+    "function mapY(value,max){return PAD_TOP+(1-value/max)*(h-PAD_TOP-PAD_BOTTOM);}"
     "function plot(data,max,color,dashed){"
     "ctx.setLineDash(dashed?[5,5]:[]);ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();"
     "var started=false;"
     "for(var i=0;i<data.length;i++){"
-    "if(data[i]===null||data[i]===undefined){started=false;continue;}"
-    "var x=w*i/(MAXPTS-1),y=h-(data[i]/max)*h;"
+    /* Skip nulls WITHOUT resetting `started` - operator-reported: the solid
+     * line looked like disconnected dots because the coarse ~10s-spaced
+     * backfill (and any brief sensor-invalid tick) leaves gaps in the
+     * array; the old code treated every null as "break the line", so each
+     * isolated real value rendered as its own unconnected dot instead of
+     * one continuous curve. Just skipping (not breaking) bridges any gap
+     * with a straight line to the next real point - nothing is drawn PAST
+     * the last real point, since the loop simply ends. */
+    "if(data[i]===null||data[i]===undefined){continue;}"
+    "var x=w*i/(MAXPTS-1),y=mapY(data[i],max);"
     "if(!started){ctx.moveTo(x,y);started=true;}else{ctx.lineTo(x,y);}}"
     "ctx.stroke();ctx.setLineDash([]);"
     "}"
@@ -420,20 +532,36 @@ static const char *DASHBOARD_SCRIPT =
     "for(var s=0;s<profileSegments.length;s++){"
     "var seg=profileSegments[s];var mid=cursor+seg.d/2;cursor+=seg.d;"
     "var x=w*mid/durationS;"
-    "var ty=h-(seg.t/260)*h;var fy=h-(seg.f/100)*h;"
+    "var ty=mapY(seg.t,260);var fy=mapY(seg.f,100);"
     "ctx.fillStyle='#FF9746';ctx.fillText(seg.t.toFixed(0),x-8,ty-6);"
     "ctx.fillStyle='#66BB6A';ctx.fillText(seg.f+'%',x-8,fy+14);"
     "}"
     "}"
+    /* Vertical dashed reference lines for marked roast events (Turning
+     * Point/First&Second Crack/Cool Start), matching the on-device
+     * dashboard - previously only implemented there. */
+    "function drawEventMarkers(){"
+    "ctx.font='10px sans-serif';"
+    "for(var i=0;i<eventMarkers.length;i++){"
+    "var ev=eventMarkers[i];"
+    "var x=w*(ev.t/1000)/durationS;"
+    "if(x<0)x=0;if(x>w)x=w;"
+    "ctx.setLineDash([3,3]);ctx.strokeStyle='#BA68C8';ctx.lineWidth=1;"
+    "ctx.beginPath();ctx.moveTo(x,PAD_TOP);ctx.lineTo(x,h-PAD_BOTTOM);ctx.stroke();"
+    "ctx.setLineDash([]);ctx.fillStyle='#BA68C8';"
+    "ctx.fillText(EVENT_LABELS[ev.type]||'?',x+2,PAD_TOP+10);"
+    "}"
+    "}"
     "var w,h;"
     "function draw(){"
-    "chart.width=chart.clientWidth;chart.height=180;"
+    "chart.width=chart.clientWidth;chart.height=260;"
     "w=chart.width;h=chart.height;ctx.clearRect(0,0,w,h);"
     "ctx.strokeStyle='#333';ctx.lineWidth=1;ctx.beginPath();"
-    "for(var i=1;i<4;i++){var y=h*i/4;ctx.moveTo(0,y);ctx.lineTo(w,y);}ctx.stroke();"
+    "for(var i=1;i<4;i++){var y=PAD_TOP+(h-PAD_TOP-PAD_BOTTOM)*i/4;ctx.moveTo(0,y);ctx.lineTo(w,y);}ctx.stroke();"
     "plot(ttempData,260,'#FF9746',true);plot(tfanData,100,'#66BB6A',true);"
-    "plot(btData,260,'#FF9746',false);plot(fanData,100,'#66BB6A',false);"
+    "plot(btData,260,'#FF9746',false);"
     "drawSegmentLabels();"
+    "drawEventMarkers();"
     "}"
     "function onMessage(ev){"
     "var d;try{d=JSON.parse(ev.data);}catch(e){return;}"
@@ -446,6 +574,7 @@ static const char *DASHBOARD_SCRIPT =
     "computeTargetCurve();"
     "}"
     "}"
+    "if(d.events){eventMarkers=d.events.map(function(e){return {t:e[0],type:e[1]};});}"
     "setText('phase',d.phase+(d.paused?' (PAUSED)':''));"
     "setText('mode',d.mode);"
     "setText('timer',fmtTime(d.elapsedMs));"
@@ -460,7 +589,6 @@ static const char *DASHBOARD_SCRIPT =
     "var idx=Math.floor((d.elapsedMs/1000)*(MAXPTS-1)/durationS);"
     "if(idx<0)idx=0;if(idx>=MAXPTS)idx=MAXPTS-1;"
     "if(d.sensorValid)btData[idx]=d.bt;"
-    "fanData[idx]=d.fan;"
     "}"
     "draw();"
     "var banner=document.getElementById('alarmBanner');"
@@ -481,14 +609,36 @@ static const char *DASHBOARD_SCRIPT =
     "ws.onclose=function(){setTimeout(connect,2000);};"
     "ws.onerror=function(){ws.close();};"
     "}"
+    /* Operator-reported bug fix: opening/refreshing the dashboard mid-roast
+     * used to lose every point recorded before the page connected, since
+     * btData always started out empty and only filled in as new WebSocket
+     * messages arrived. Backfill from the already-recorded portion of the
+     * active session (GET /api/dashboard/live_history) so a fresh page
+     * load shows the whole curve so far immediately instead of just a
+     * fragment. IMPORTANT: this runs FULLY IN PARALLEL with connect() (not
+     * chained/gated behind it) - an earlier version called connect() only
+     * AFTER the fetch settled, which needlessly delayed the start of LIVE
+     * telemetry by however long the historical fetch took (a real,
+     * reported regression: "ainda demora bastante para o grafico abrir"). */
     "connect();"
+    "fetch('/api/dashboard/live_history').then(function(r){return r.json();}).then(function(data){"
+    "var points=data.pts||[];"
+    "for(var i=0;i<points.length;i++){"
+    "var t=points[i][0],bt=points[i][1];"
+    "var idx=Math.floor((t/1000)*(MAXPTS-1)/durationS);"
+    "if(idx<0)idx=0;if(idx>=MAXPTS)idx=MAXPTS-1;"
+    "btData[idx]=bt;"
+    "}"
+    "if(data.events){eventMarkers=data.events.map(function(e){return {t:e[0],type:e[1]};});}"
+    "draw();"
+    "}).catch(function(){});"
     "draw();"
     "function post(action,value){"
     "var body='action='+encodeURIComponent(action)+(value!==undefined?'&value='+encodeURIComponent(value):'');"
     "fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});"
     "}"
     "document.getElementById('startBtn').addEventListener('click',function(){post('start');"
-    "btData=new Array(MAXPTS).fill(null);fanData=new Array(MAXPTS).fill(null);draw();});"
+    "btData=new Array(MAXPTS).fill(null);draw();});"
     "document.getElementById('chargeBtn').addEventListener('click',function(){post('confirm_charge');});"
     "document.getElementById('pauseBtn').addEventListener('click',function(){"
     "post(this.textContent==='Pause'?'pause':'resume');});"
@@ -524,7 +674,7 @@ void dashboard_routes_send_page(httpd_req_t *req)
                            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
                            "<title>Pop Roaster</title>",
                            HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, WEB_UI_STYLE, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, WEB_UI_STYLE_LINK, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, "</head><body><div class='app'>", HTTPD_RESP_USE_STRLEN);
     web_ui_send_nav_bar(req, "dashboard");
     httpd_resp_send_chunk(req, "<main class='content'>", HTTPD_RESP_USE_STRLEN);
@@ -535,8 +685,8 @@ void dashboard_routes_send_page(httpd_req_t *req)
                            "<div class='sub'>Phase: <span id='phase'>--</span> &middot; Mode: <span id='mode'>--</span>"
                            " &middot; Time: <span id='timer'>00:00</span></div>"
                            "<canvas id='chart'></canvas>"
-                           "<div class='legend'><span class='bt'>&#9679; BT</span> &nbsp; <span class='fan'>&#9679; Fan</span> &nbsp; "
-                           "<span style='color:var(--muted)'>(dashed = profile target)</span></div>"
+                           "<div class='legend'><span class='bt'>&#9679; BT</span> &nbsp; "
+                           "<span style='color:var(--muted)'>(dashed = profile target, incl. Fan - no solid Fan line, this hardware has no RPM sensor)</span></div>"
                            "<div class='grid'>"
                            "<div class='stat'><div class='label'>Bean Temp / Target</div><div class='value'><span id='bt'>--</span> / <span id='tbt'>--</span></div></div>"
                            "<div class='stat'><div class='label'>Rate of Rise</div><div class='value' id='ror'>--</div></div>"
@@ -570,13 +720,20 @@ esp_err_t dashboard_routes_register(httpd_handle_t server)
     s_server_handle = server;
     memset(s_ws_fds, 0, sizeof(s_ws_fds));
 
+    httpd_uri_t style_uri = { .uri = "/style.css", .method = HTTP_GET, .handler = style_css_get_handler };
+    esp_err_t err = httpd_register_uri_handler(server, &style_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /style.css: %s", esp_err_to_name(err));
+        return err;
+    }
+
     httpd_uri_t ws_uri = {
         .uri = "/ws/telemetry",
         .method = HTTP_GET,
         .handler = ws_telemetry_handler,
         .is_websocket = true,
     };
-    esp_err_t err = httpd_register_uri_handler(server, &ws_uri);
+    err = httpd_register_uri_handler(server, &ws_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register /ws/telemetry: %s", esp_err_to_name(err));
         return err;
@@ -590,6 +747,17 @@ esp_err_t dashboard_routes_register(httpd_handle_t server)
     err = httpd_register_uri_handler(server, &control_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register /api/control: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    httpd_uri_t live_history_uri = {
+        .uri = "/api/dashboard/live_history",
+        .method = HTTP_GET,
+        .handler = live_history_get_handler,
+    };
+    err = httpd_register_uri_handler(server, &live_history_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /api/dashboard/live_history: %s", esp_err_to_name(err));
         return err;
     }
 

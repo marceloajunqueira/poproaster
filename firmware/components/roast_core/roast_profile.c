@@ -58,3 +58,62 @@ uint8_t roast_profile_get_segment_index(const roast_profile_t *profile, uint32_t
     }
     return locate_segment(profile, elapsed_s);
 }
+
+/* Default duration for an auto-appended/converted mandatory trailing
+ * Cooling segment - a reasonable middle-of-the-road cool-down time. */
+#define DEFAULT_COOLING_DURATION_S 300
+
+void roast_profile_ensure_trailing_cooling(roast_profile_t *profile)
+{
+    if (profile == NULL) {
+        return;
+    }
+
+    if (profile->point_count == 0) {
+        profile->points[0].duration_s = DEFAULT_COOLING_DURATION_S;
+        profile->points[0].target_temp_c = ROAST_PROFILE_COOLING_TEMP_C;
+        profile->points[0].target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT;
+        profile->points[0].is_cooling = true;
+        profile->point_count = 1;
+        return;
+    }
+
+    /* Per operator requirement: Cooling is now ALWAYS exactly the LAST
+     * segment - normalize any legacy/imported/hand-crafted data that might
+     * have it elsewhere (or nowhere, or in more than one place). */
+    for (uint8_t i = 0; i < profile->point_count - 1; i++) {
+        if (profile->points[i].is_cooling) {
+            /* An intermediate segment was marked cooling by older data -
+             * demote it back to a normal (heating) segment with a
+             * reasonable target, since Cooling is no longer a per-segment
+             * choice. */
+            profile->points[i].is_cooling = false;
+            if (profile->points[i].target_fan_pct < ROAST_PROFILE_FAN_MIN_PCT) {
+                profile->points[i].target_fan_pct = ROAST_PROFILE_FAN_MIN_PCT;
+            }
+        }
+    }
+
+    roast_profile_point_t *last = &profile->points[profile->point_count - 1];
+    if (last->is_cooling) {
+        return; /* Already conforms. */
+    }
+
+    if (profile->point_count < ROAST_PROFILE_MAX_POINTS) {
+        /* Room to append a fresh, dedicated Cooling segment. */
+        roast_profile_point_t *cooling = &profile->points[profile->point_count];
+        cooling->duration_s = DEFAULT_COOLING_DURATION_S;
+        cooling->target_temp_c = ROAST_PROFILE_COOLING_TEMP_C;
+        cooling->target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT;
+        cooling->is_cooling = true;
+        profile->point_count++;
+    } else {
+        /* Already at the max segment count - convert the last existing
+         * segment into the mandatory Cooling one rather than silently
+         * dropping the requirement (keeps its own duration, since that's
+         * still a reasonable operator-configured value). */
+        last->target_temp_c = ROAST_PROFILE_COOLING_TEMP_C;
+        last->target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT;
+        last->is_cooling = true;
+    }
+}

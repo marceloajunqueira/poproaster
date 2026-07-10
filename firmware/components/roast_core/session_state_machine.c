@@ -22,8 +22,6 @@ static roast_session_t s_session;
 static int64_t s_pause_started_at_ms = 0;
 static int64_t s_total_paused_ms = 0;
 static int64_t s_ended_at_ms = 0; /* Set when the session reaches COMPLETED/ABORTED, so elapsed_ms freezes instead of counting against live time. */
-static bool s_pending_abort = false; /* Set by session_sm_cancel() (Cancel/Emergency Stop) - once cooling naturally ends, session_sm_complete() finalizes as ABORTED (with s_pending_abort_reason) instead of COMPLETED. */
-static char s_pending_abort_reason[64];
 static esp_timer_handle_t s_snapshot_timer;
 
 static int64_t now_ms(void)
@@ -104,8 +102,6 @@ esp_err_t session_sm_start(roast_control_mode_t mode)
     s_pause_started_at_ms = 0;
     s_total_paused_ms = 0;
     s_ended_at_ms = 0;
-    s_pending_abort = false;
-    s_pending_abort_reason[0] = '\0';
 
     ESP_LOGI(TAG, "Session '%s' started in %s mode", s_session.session_id,
              mode == ROAST_MODE_PROFILE ? "PROFILE" : "MANUAL_ARTISAN");
@@ -164,47 +160,14 @@ esp_err_t session_sm_start_cooling(void)
     }
     s_session.phase = ROAST_PHASE_COOLING;
     /* FR-005/T025: Cooling always forces the heater off immediately as part
-     * of the transition itself (the profile's own trailing Cooling
-     * segment, or session_sm_cancel() below) - never a separate heater-off
-     * command. The fan is deliberately left untouched so it keeps running
+     * of the transition itself (only ever reached here now, via the
+     * profile's own trailing Cooling segment - operator Cancel/Emergency
+     * Stop go straight to ABORTED via session_sm_abort() instead, see
+     * below). The fan is deliberately left untouched so it keeps running
      * through cooling (profile_curve_follower.c then drives it per the
-     * Cooling segment's own curve, or a safe fallback speed). */
+     * Cooling segment's own curve). */
     ssr_heater_force_off();
     ESP_LOGI(TAG, "Session '%s' entering COOLING (heater forced off, fan unchanged)", s_session.session_id);
-    persist_snapshot();
-    return ESP_OK;
-}
-
-esp_err_t session_sm_cancel(const char *reason)
-{
-    if (s_session.phase == ROAST_PHASE_IDLE || s_session.phase == ROAST_PHASE_COMPLETED ||
-        s_session.phase == ROAST_PHASE_ABORTED) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    strncpy(s_pending_abort_reason, reason ? reason : "Cancelled", sizeof(s_pending_abort_reason) - 1);
-    s_pending_abort_reason[sizeof(s_pending_abort_reason) - 1] = '\0';
-    s_pending_abort = true;
-
-    if (s_session.phase == ROAST_PHASE_COOLING) {
-        /* Already cooling (e.g. the profile's own trailing Cooling segment
-         * was already running) - just mark the eventual outcome as ABORTED
-         * instead of COMPLETED; no phase change needed. */
-        ESP_LOGW(TAG, "Session '%s' cancel requested while already COOLING: %s", s_session.session_id,
-                 s_pending_abort_reason);
-        persist_snapshot();
-        return ESP_OK;
-    }
-
-    /* PREHEAT/ROASTING/DEVELOPMENT -> force an immediate transition into
-     * COOLING instead of stopping outright: heater off right away, but the
-     * fan keeps running (see SAFETY_FAN_STOP_MIN_TEMP_C) until
-     * profile_curve_follower.c decides it's actually safe/done to finalize
-     * via session_sm_complete(). */
-    s_session.phase = ROAST_PHASE_COOLING;
-    ssr_heater_force_off();
-    ESP_LOGW(TAG, "Session '%s' cancelled: %s - entering COOLING (fan stays on until safe)", s_session.session_id,
-             s_pending_abort_reason);
     persist_snapshot();
     return ESP_OK;
 }
@@ -214,13 +177,8 @@ esp_err_t session_sm_complete(void)
     if (s_session.phase != ROAST_PHASE_COOLING) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_pending_abort) {
-        s_session.phase = ROAST_PHASE_ABORTED;
-        ESP_LOGW(TAG, "Session '%s' finished cooling and is ABORTED: %s", s_session.session_id, s_pending_abort_reason);
-    } else {
-        s_session.phase = ROAST_PHASE_COMPLETED;
-        ESP_LOGI(TAG, "Session '%s' COMPLETED", s_session.session_id);
-    }
+    s_session.phase = ROAST_PHASE_COMPLETED;
+    ESP_LOGI(TAG, "Session '%s' COMPLETED", s_session.session_id);
     s_ended_at_ms = now_ms();
     persist_snapshot();
     return ESP_OK;

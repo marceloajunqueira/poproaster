@@ -5,6 +5,7 @@ idf_component_register(
         "fan_pwm.c"
         "wifi_provisioning.c"
         "touch_driver.c"
+        "ota_manager.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -19,4 +20,8 @@ idf_component_register(
         esp_http_server
         nvs_flash
         esp_lcd_touch_gt911
+        app_update
+        esp_app_format
+        esp_timer
+        mdns
 )

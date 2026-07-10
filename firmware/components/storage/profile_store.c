@@ -170,6 +170,13 @@ esp_err_t profile_store_create(const roast_profile_t *profile, int *out_id)
     if (profile == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    /* Authoritative last line of defense: every stored profile must end
+     * with exactly one Cooling segment, regardless of which caller
+     * (display editor, web editor, import) is saving it. */
+    roast_profile_t normalized = *profile;
+    roast_profile_ensure_trailing_cooling(&normalized);
+    profile = &normalized;
+
     profile_index_t idx;
     if (load_index(&idx) != ESP_OK) {
         memset(&idx, 0, sizeof(idx));
@@ -227,6 +234,10 @@ esp_err_t profile_store_update(int id, const roast_profile_t *profile)
     if (profile == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    roast_profile_t normalized = *profile;
+    roast_profile_ensure_trailing_cooling(&normalized);
+    profile = &normalized;
+
     profile_index_t idx;
     if (load_index(&idx) != ESP_OK) {
         return ESP_ERR_NOT_FOUND;

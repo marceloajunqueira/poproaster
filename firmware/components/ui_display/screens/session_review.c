@@ -15,6 +15,7 @@
 #include "esp_log.h"
 
 #include "roast_core/roast_profile.h"
+#include "roast_core/roast_events.h"
 #include "storage/session_store.h"
 #include "ui_display/screens/session_review.h"
 
@@ -37,6 +38,7 @@ static lv_style_t s_style_btn_danger;
 static lv_style_t s_style_btn_label;
 static lv_style_t s_style_seg_temp_label;
 static lv_style_t s_style_seg_fan_label;
+static lv_style_t s_style_event_marker_label;
 static bool s_styles_ready = false;
 
 static void ensure_styles(void)
@@ -72,6 +74,12 @@ static void ensure_styles(void)
     lv_style_init(&s_style_seg_fan_label);
     lv_style_set_text_color(&s_style_seg_fan_label, lv_color_hex(0x66BB6A));
     lv_style_set_text_font(&s_style_seg_fan_label, &lv_font_montserrat_12);
+
+    /* T056/T065: event marker vertical-line short labels - matches
+     * roast_dashboard.c's live chart. */
+    lv_style_init(&s_style_event_marker_label);
+    lv_style_set_text_color(&s_style_event_marker_label, lv_color_hex(0xBA68C8));
+    lv_style_set_text_font(&s_style_event_marker_label, &lv_font_montserrat_12);
 
     s_styles_ready = true;
 }
@@ -184,11 +192,23 @@ static void show_session_detail(lv_obj_t *parent, const char *session_id)
     long heater_sum = 0, fan_sum = 0;
     size_t sample_count = 0;
     bool any_sample = false;
+    roast_event_record_t detail_events[ROAST_EVENTS_MAX];
+    size_t detail_event_count = 0;
 
     while (fgets(line, sizeof(line), f) != NULL) {
         long long t = 0;
         float bt = 0.0f, ror = 0.0f;
         int fan = 0, heater = 0, phase = 0;
+        int ev_type = -1;
+        if (strstr(line, "\"ev\":") != NULL) {
+            if (sscanf(line, "{\"t\":%lld,\"ev\":%d}", &t, &ev_type) == 2 &&
+                detail_event_count < ROAST_EVENTS_MAX) {
+                detail_events[detail_event_count].type = (roast_event_type_t)ev_type;
+                detail_events[detail_event_count].elapsed_ms = t;
+                detail_event_count++;
+            }
+            continue;
+        }
         if (sscanf(line, "{\"t\":%lld,\"bt\":%f,\"ror\":%f,\"fan\":%d,\"heater\":%d,\"phase\":%d}",
                    &t, &bt, &ror, &fan, &heater, &phase) >= 3) {
             if (t > max_t_ms) {
@@ -238,15 +258,16 @@ static void show_session_detail(lv_obj_t *parent, const char *session_id)
     lv_chart_set_div_line_count(chart, 3, 4);
     lv_chart_set_point_count(chart, MAX_CHART_POINTS);
     lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y, 0, 260);   /* BT: 0-260C (FR-026 absolute cutoff). */
-    lv_chart_set_range(chart, LV_CHART_AXIS_SECONDARY_Y, 0, 100); /* Fan: 0-100%. */
+    lv_chart_set_range(chart, LV_CHART_AXIS_SECONDARY_Y, 0, 100); /* Fan: 0-100% (still used by the dashed Fan target overlay's pixel mapping). */
     lv_chart_series_t *bt_series = lv_chart_add_series(chart, lv_color_hex(0xFF9746), LV_CHART_AXIS_PRIMARY_Y);
-    lv_chart_series_t *fan_series = lv_chart_add_series(chart, lv_color_hex(0x66BB6A), LV_CHART_AXIS_SECONDARY_Y);
     lv_chart_set_all_value(chart, bt_series, LV_CHART_POINT_NONE);
-    lv_chart_set_all_value(chart, fan_series, LV_CHART_POINT_NONE);
 
     /* Second pass: plot the actual measured curve, indexed by each
      * line's own recorded elapsed time (not line position) so it
-     * lines up exactly with the target overlay below. */
+     * lines up exactly with the target overlay below. No solid "actual"
+     * Fan series - this hardware has no RPM sensor, so it would just be an
+     * echo of the commanded value (already shown by the dashed Fan target
+     * line and the Avg Fan% stat). */
     rewind(f);
     while (fgets(line, sizeof(line), f) != NULL) {
         long long t = 0;
@@ -258,7 +279,6 @@ static void show_session_detail(lv_obj_t *parent, const char *session_id)
             if (idx < 0) idx = 0;
             if (idx >= MAX_CHART_POINTS) idx = MAX_CHART_POINTS - 1;
             lv_chart_set_value_by_id(chart, bt_series, (uint16_t)idx, (lv_coord_t)bt);
-            lv_chart_set_value_by_id(chart, fan_series, (uint16_t)idx, (lv_coord_t)fan);
         }
     }
     fclose(f);
@@ -374,6 +394,38 @@ static void show_session_detail(lv_obj_t *parent, const char *session_id)
         }
     }
 
+    /* T056/T065: vertical reference-line markers for events recorded during
+     * this session (parsed from the "ev" lines above) - same overlay
+     * technique, independent of whether a profile snapshot exists. */
+    if (detail_event_count > 0 && chart_w > 0 && chart_h > 0) {
+        lv_coord_t ev_content_w = lv_obj_get_content_width(chart);
+        lv_coord_t ev_content_h = lv_obj_get_content_height(chart);
+        for (size_t i = 0; i < detail_event_count; i++) {
+            int64_t elapsed_s = detail_events[i].elapsed_ms / 1000;
+            if (elapsed_s < 0) {
+                elapsed_s = 0;
+            }
+            lv_coord_t x = (lv_coord_t)((int64_t)elapsed_s * ev_content_w / (int64_t)(duration_s > 0 ? duration_s : 1));
+            if (x < 0) x = 0;
+            if (x > ev_content_w) x = ev_content_w;
+
+            lv_point_t pts[2] = {{x, 0}, {x, ev_content_h}};
+            lv_obj_t *ev_line = lv_line_create(chart);
+            lv_obj_set_style_line_color(ev_line, lv_color_hex(0xBA68C8), LV_PART_MAIN);
+            lv_obj_set_style_line_width(ev_line, 1, LV_PART_MAIN);
+            lv_obj_set_style_line_dash_width(ev_line, 3, LV_PART_MAIN);
+            lv_obj_set_style_line_dash_gap(ev_line, 3, LV_PART_MAIN);
+            lv_obj_clear_flag(ev_line, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_pos(ev_line, 0, 0);
+            lv_line_set_points(ev_line, pts, 2);
+
+            lv_obj_t *ev_lbl = lv_label_create(chart);
+            lv_obj_add_style(ev_lbl, &s_style_event_marker_label, LV_PART_MAIN);
+            lv_label_set_text(ev_lbl, roast_event_short_label(detail_events[i].type));
+            lv_obj_set_pos(ev_lbl, x + 2, 2);
+        }
+    }
+
     /* Compact single-line legend, short enough to never need ellipsis at
      * this width. */
     lv_obj_t *legend = lv_label_create(root);
@@ -411,6 +463,33 @@ static void show_session_detail(lv_obj_t *parent, const char *session_id)
     lv_obj_add_style(stat4, &s_style_stat_label, LV_PART_MAIN);
     snprintf(stat_buf, sizeof(stat_buf), "Avg Fan/Heater: %ld%%/%ld%%", avg_fan, avg_heater);
     lv_label_set_text(stat4, stat_buf);
+
+    /* T057: batch metadata, only shown when the operator actually filled
+     * something in (older sessions and quick test roasts won't have it). */
+    bool has_batch_info = has_meta && (meta.batch.coffee_name[0] != '\0' ||
+                                        meta.batch.origin[0] != '\0' ||
+                                        meta.batch.weight_g > 0.0f);
+    if (has_batch_info) {
+        lv_obj_t *batch_title = lv_label_create(root);
+        lv_obj_add_style(batch_title, &s_style_stat_label, LV_PART_MAIN);
+        lv_label_set_text(batch_title, "Batch Info:");
+
+        lv_obj_t *stat_row3 = make_flex_row(root, content_w);
+        lv_obj_t *stat5 = lv_label_create(stat_row3);
+        lv_obj_add_style(stat5, &s_style_stat_label, LV_PART_MAIN);
+        snprintf(stat_buf, sizeof(stat_buf), "Coffee: %s", meta.batch.coffee_name[0] ? meta.batch.coffee_name : "-");
+        lv_label_set_text(stat5, stat_buf);
+        lv_obj_t *stat6 = lv_label_create(stat_row3);
+        lv_obj_add_style(stat6, &s_style_stat_label, LV_PART_MAIN);
+        snprintf(stat_buf, sizeof(stat_buf), "Origin: %s", meta.batch.origin[0] ? meta.batch.origin : "-");
+        lv_label_set_text(stat6, stat_buf);
+
+        lv_obj_t *stat_row4 = make_flex_row(root, content_w);
+        lv_obj_t *stat7 = lv_label_create(stat_row4);
+        lv_obj_add_style(stat7, &s_style_stat_label, LV_PART_MAIN);
+        snprintf(stat_buf, sizeof(stat_buf), "Weight: %.0f g", (double)meta.batch.weight_g);
+        lv_label_set_text(stat7, stat_buf);
+    }
 }
 
 static void session_item_event_cb(lv_event_t *e)
