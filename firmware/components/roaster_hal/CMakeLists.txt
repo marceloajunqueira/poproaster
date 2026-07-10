@@ -1,0 +1,22 @@
+idf_component_register(
+    SRCS
+        "max6675.c"
+        "ssr_heater.c"
+        "fan_pwm.c"
+        "wifi_provisioning.c"
+        "touch_driver.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        board_config
+        storage
+        driver
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_driver_spi
+        esp_wifi
+        esp_netif
+        esp_http_server
+        nvs_flash
+        esp_lcd_touch_gt911
+)

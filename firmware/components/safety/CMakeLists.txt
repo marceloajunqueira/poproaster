@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "safety_manager.c"
+        "duration_watchdog.c"
+        "fan_failure_detector.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        roaster_hal
+        roast_core
+        esp_timer
+)

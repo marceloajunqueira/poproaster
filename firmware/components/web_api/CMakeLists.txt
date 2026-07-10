@@ -1,0 +1,24 @@
+idf_component_register(
+    SRCS
+        "server.c"
+        "wifi_setup_routes.c"
+        "dashboard_routes.c"
+        "history_routes.c"
+        "presets_routes.c"
+        "diagnostics_routes.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_http_server
+        lwip
+        roaster_hal
+        roast_core
+        storage
+        safety
+        nvs_flash
+        heap
+        esp_app_format
+        esp_hw_support
+        freertos
+        esp_timer
+)

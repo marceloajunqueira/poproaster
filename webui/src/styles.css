@@ -1,0 +1,35 @@
+/* T005: minimal base stylesheet, expanded as dashboard/wifi_setup/firmware_update pages are built. */
+:root {
+    color-scheme: light dark;
+    --pop-roaster-accent: #d97706;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: system-ui, sans-serif;
+    background: #111;
+    color: #eee;
+}
+
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    background: #1b1b1b;
+    border-bottom: 2px solid var(--pop-roaster-accent);
+}
+
+header nav a {
+    color: #eee;
+    margin-left: 1rem;
+    text-decoration: none;
+}
+
+main {
+    padding: 1rem;
+}

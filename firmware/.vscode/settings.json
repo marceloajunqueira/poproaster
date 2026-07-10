@@ -1,0 +1,17 @@
+{
+  "idf.customExtraVars": {
+    "IDF_PATH": "C:/esp/v6.0/esp-idf",
+    "IDF_TOOLS_PATH": "C:/Espressif/tools",
+    "PYTHON": "C:/Espressif/tools/python/v6.0/venv/Scripts/python.exe",
+    "IDF_TARGET": "esp32s3"
+  },
+  "idf.currentSetup": "C:\\esp\\v6.0\\esp-idf",
+  "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-20.1.1_20250829\\esp-clang\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=c:\\Users\\mjunqueira_neowrk\\Desktop\\Repositorios\\PopRoaster\\firmware\\build"
+  ],
+  "idf.portWin": "COM87",
+  "idf.flashType": "UART"
+}

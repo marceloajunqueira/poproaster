@@ -1,0 +1,26 @@
+<!doctype html>
+<!-- T005: webui static project skeleton. Pages are served by the ESP32's
+     HTTP server (firmware/components/web_api/server.c) directly from flash
+     (LittleFS/SPIFFS "storage" partition, see firmware/partitions.csv). -->
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pop Roaster</title>
+    <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+    <header>
+        <h1>Pop Roaster</h1>
+        <nav>
+            <a href="index.html">Dashboard</a>
+            <a href="wifi_setup.html">Wi-Fi Setup</a>
+            <a href="firmware_update.html">Firmware Update</a>
+        </nav>
+    </header>
+    <main id="app-root">
+        <!-- Populated by dashboard.js (see T043/T044/T045) -->
+    </main>
+    <script src="dashboard.js"></script>
+</body>
+</html>

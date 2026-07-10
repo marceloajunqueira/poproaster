@@ -1,0 +1,89 @@
+menu "Pop Roaster Board Configuration"
+
+    choice POPROASTER_BOARD
+        prompt "Target display/board"
+        default POPROASTER_BOARD_JC4827W543
+        help
+            Selects which display/board profile to compile against. Each board
+            profile defines its own fixed display/touch pin mapping under
+            components/board_config/boards/. Add a new board by creating a
+            new header there and a new choice entry here.
+
+        config POPROASTER_BOARD_JC4827W543
+            bool "Guition JC4827W543 (ESP32-S3, 480x272, NV3041A, GT911)"
+    endchoice
+
+    config POPROASTER_BOARD_NAME
+        string
+        default "jc4827w543" if POPROASTER_BOARD_JC4827W543
+
+    menu "External Peripheral GPIOs (JST1.25 expansion connectors)"
+        comment "Confirmed physical pinout on this JC4827W543 unit (4-pin JST1.25 connectors, in connection order):"
+        comment "  P1: GND, RXD, TXD, +5V           (UART/power - not general purpose GPIO)"
+        comment "  P2: IO46, IO9, IO14, IO5"
+        comment "  P3: IO6, IO7, IO15, IO16"
+        comment "  P4: GND, 3.3V, IO17, IO18"
+        comment "NOTE: IO46 is INPUT-ONLY on ESP32-S3 (cannot drive outputs) - assigned below to MAX6675 SO/MISO, which is a read-only signal from the MCU's perspective. Do not assign IO46 to SSR or Fan PWM (both require output-capable pins)."
+        comment "Spare GPIOs not assigned by default (available for future peripherals, e.g. fan RPM feedback): IO9, IO14, IO16, IO17, IO18"
+
+        config POPROASTER_MAX6675_SCK_GPIO
+            int "MAX6675 SCK (clock) GPIO"
+            default 5
+            help
+                SPI-like clock pin driving the MAX6675 thermocouple amplifier.
+                Default: IO5 (P2, 4th pin).
+
+        config POPROASTER_MAX6675_CS_GPIO
+            int "MAX6675 CS (chip select) GPIO"
+            default 6
+            help
+                Default: IO6 (P3, 1st pin).
+
+        config POPROASTER_MAX6675_SO_GPIO
+            int "MAX6675 SO / MISO (serial out) GPIO"
+            default 46
+            help
+                Default: IO46 (P2, 1st pin). IO46 is input-only on ESP32-S3,
+                which is safe here since MAX6675 SO only ever sends data TO
+                the MCU (never receives).
+
+        config POPROASTER_SSR_HEATER_GPIO
+            int "SSR heater control GPIO (1 pin, on/off)"
+            default 7
+            help
+                Drives the 40A SSR module controlling the heating element.
+                Time-proportioning (duty cycle) is handled in software; this
+                is a single digital output pin. Default: IO7 (P3, 2nd pin).
+                Must be an output-capable pin (do NOT use IO46 here).
+
+        config POPROASTER_FAN_PWM_GPIO
+            int "Fan PWM control GPIO"
+            default 15
+            help
+                Drives the 15A PWM module controlling the fan motor.
+                Default: IO15 (P3, 3rd pin). Must be an output-capable pin
+                (do NOT use IO46 here).
+
+        config POPROASTER_FAN_PWM_LEDC_TIMER
+            int "Fan PWM LEDC timer index (0-3)"
+            default 1
+            help
+                LEDC timer 0 / channel 0 is reserved for the display backlight
+                on most JC4827W543 reference firmware; default to timer 1 to
+                avoid conflicts.
+
+        config POPROASTER_FAN_PWM_LEDC_CHANNEL
+            int "Fan PWM LEDC channel index (0-7)"
+            default 1
+
+        config POPROASTER_FAN_PWM_FREQ_HZ
+            int "Fan PWM frequency (Hz)"
+            default 20000
+            help
+                20 kHz is inaudible for most small DC fan/PWM driver modules.
+                Lower it if your specific PWM module requires a slower switching
+                frequency.
+
+    endmenu
+
+endmenu

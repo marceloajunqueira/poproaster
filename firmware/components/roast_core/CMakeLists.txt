@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS
+        "session_state_machine.c"
+        "ror_calculator.c"
+        "dtr_calculator.c"
+        "command_dispatcher.c"
+        "roast_telemetry_service.c"
+        "session_recovery.c"
+        "roast_profile.c"
+        "profile_curve_follower.c"
+        "heater_pid.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_timer
+        safety
+        roaster_hal
+        storage
+)

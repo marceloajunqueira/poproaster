@@ -1,0 +1,331 @@
+openapi: 3.1.0
+info:
+  title: Pop Roaster Local API
+  version: 0.1.0
+  description: API local para monitoramento, controle e manutenção do torrador Pop Roaster.
+servers:
+  - url: http://poproaster.local
+paths:
+  /api/v1/system/status:
+    get:
+      summary: Estado geral do sistema
+      responses:
+        '200':
+          description: Estado atual
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemStatus'
+  /api/v1/control/command:
+    post:
+      summary: Envia comando operacional (com validação de safety)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControlCommand'
+      responses:
+        '202':
+          description: Comando aceito
+        '409':
+          description: Comando bloqueado por regra de segurança
+  /api/v1/profiles:
+    get:
+      summary: Lista perfis de torra
+      responses:
+        '200':
+          description: Lista de perfis
+    post:
+      summary: Cria perfil
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoastProfile'
+      responses:
+        '201':
+          description: Perfil criado
+  /api/v1/profiles/{profileId}:
+    put:
+      summary: Atualiza perfil
+      parameters:
+        - in: path
+          name: profileId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoastProfile'
+      responses:
+        '200':
+          description: Perfil atualizado
+    delete:
+      summary: Exclui perfil
+      parameters:
+        - in: path
+          name: profileId
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Perfil excluído
+  /api/v1/sessions/current:
+    get:
+      summary: Sessão de torra atual
+      responses:
+        '200':
+          description: Sessão atual
+  /api/v1/sessions/{sessionId}/export:
+    get:
+      summary: Exporta sessão concluída (CSV ou .alog do Artisan)
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: format
+          required: true
+          schema:
+            type: string
+            enum: [csv, alog]
+      responses:
+        '200':
+          description: Arquivo exportado
+  /api/v1/profiles/{profileId}/export:
+    get:
+      summary: Exporta perfil de torra em JSON
+      parameters:
+        - in: path
+          name: profileId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Perfil em JSON
+  /api/v1/profiles/import:
+    post:
+      summary: Importa perfil de torra a partir de arquivo JSON
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Perfil importado
+        '400':
+          description: Arquivo de perfil inválido
+  /api/v1/calibration/sensor:
+    get:
+      summary: Consulta offset de calibração atual do sensor
+      responses:
+        '200':
+          description: Offset atual
+    put:
+      summary: Define/ajusta offset de calibração do sensor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SensorCalibration'
+      responses:
+        '200':
+          description: Calibração aplicada
+  /api/v1/settings/language:
+    put:
+      summary: Define idioma da interface (display e web)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [language]
+              properties:
+                language:
+                  type: string
+                  enum: [EN, PT, ES]
+      responses:
+        '200':
+          description: Idioma atualizado
+  /api/v1/peripherals/test:
+    post:
+      summary: Executa teste de periféricos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PeripheralTestRequest'
+      responses:
+        '200':
+          description: Resultado do teste
+  /api/v1/firmware/upload:
+    post:
+      summary: Upload de firmware para OTA
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '202':
+          description: Firmware recebido para validação/instalação
+        '400':
+          description: Firmware inválido
+  /api/v1/firmware/status:
+    get:
+      summary: Status de atualização de firmware
+      responses:
+        '200':
+          description: Estado atual da atualização
+  /api/v1/ws:
+    get:
+      summary: WebSocket para telemetria e eventos em tempo real
+      responses:
+        '101':
+          description: Switching Protocols
+
+components:
+  schemas:
+    SystemStatus:
+      type: object
+      required: [phase, controlMode, fanPct, heaterPct, safetyState]
+      properties:
+        phase:
+          type: string
+          enum: [IDLE, PREHEAT, ROASTING, DEVELOPMENT, COOLING, COMPLETED, ABORTED]
+        controlMode:
+          type: string
+          enum: [PROFILE, MANUAL_ARTISAN]
+        fanPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        heaterPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        beanTempC:
+          type: number
+          nullable: true
+        rorCPerMin:
+          type: number
+          nullable: true
+        dtrPct:
+          type: number
+          nullable: true
+        safetyState:
+          type: string
+          enum: [OK, WARNING, TRIPPED]
+        activeAlarmIds:
+          type: array
+          items:
+            type: string
+    ControlCommand:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [START, PAUSE, RESUME, STOP, SET_FAN, SET_HEATER, START_COOLING, MARK_EVENT, EMERGENCY_STOP, ACK_ALARM, SWITCH_TO_MANUAL_ARTISAN]
+        fanPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        heaterPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        eventType:
+          type: string
+        alarmId:
+          type: string
+        confirmIrreversible:
+          type: boolean
+          description: Obrigatório true para SWITCH_TO_MANUAL_ARTISAN (irreversível na sessão)
+    SensorCalibration:
+      type: object
+      required: [offsetC, referenceUsed]
+      properties:
+        offsetC:
+          type: number
+        referenceUsed:
+          type: string
+    CurvePoint:
+      type: object
+      required: [tSec, targetTempC]
+      properties:
+        tSec:
+          type: integer
+          minimum: 0
+        targetTempC:
+          type: number
+        targetFanPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        targetHeaterPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+    RoastProfile:
+      type: object
+      required: [name, roastCurve, maxHeaterPct]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        description:
+          type: string
+          maxLength: 256
+        roastCurve:
+          type: array
+          minItems: 2
+          items:
+            $ref: '#/components/schemas/CurvePoint'
+        maxHeaterPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        dropCurvePointIndex:
+          type: integer
+          description: Índice do ponto da curva que dispara transição automática para resfriamento (opcional)
+    PeripheralTestRequest:
+      type: object
+      required: [target]
+      properties:
+        target:
+          type: string
+          enum: [THERMOCOUPLE, FAN, HEATER]
+        durationMs:
+          type: integer
+          minimum: 100
+          maximum: 10000
+        requireConfirm:
+          type: boolean
+          default: true

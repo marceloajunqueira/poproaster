@@ -1,0 +1,26 @@
+idf_component_register(
+    SRCS
+        "i18n.c"
+        "display_panel.c"
+        "nv3041_qspi.c"
+        "widgets/nav_shell.c"
+        "screens/placeholder_screen.c"
+        "screens/roast_dashboard.c"
+        "screens/manual_control.c"
+        "screens/profile_list.c"
+        "screens/profile_editor.c"
+        "screens/session_review.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        storage
+        board_config
+        roaster_hal
+        roast_core
+        esp_lcd
+        esp_driver_spi
+        esp_driver_ledc
+        eric-c-e__esp_lcd_nv3041
+        espressif__esp_lvgl_port
+        lvgl__lvgl
+)

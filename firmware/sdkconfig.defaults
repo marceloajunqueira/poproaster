@@ -1,0 +1,51 @@
+# T003/T002: Baseline sdkconfig defaults for the JC4827W543 (ESP32-S3-WROOM-1-N4R8).
+# Run `idf.py set-target esp32s3` once, then `idf.py menuconfig` to review/tune
+# board_config peripheral GPIOs (Pop Roaster Board Configuration menu).
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# Octal PSRAM (8MB) present on the N4R8 module - required for LVGL draw buffers.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Custom partition table with OTA A/B scheme (see partitions.csv).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# N4R8 module has 4MB flash; partitions.csv (OTA A/B + storage) needs the full 4MB.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+
+# App rollback support: new firmware must call esp_ota_mark_app_valid_cancel_rollback()
+# after self-checking, otherwise the bootloader reverts to the previous OTA slot
+# on the next boot (backs FR-015's "keep current partition on failure" behavior).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+CONFIG_FREERTOS_HZ=1000
+
+# T041: WebSocket support for the live web dashboard telemetry stream
+# (firmware/components/web_api/dashboard_routes.c).
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# T-nav_shell: montserrat_12 for the narrow sidebar's Emergency Stop button
+# label (montserrat_14, the default, overflows the 76px-wide button).
+CONFIG_LV_FONT_MONTSERRAT_12=y
+
+# esp_timer's single shared dispatch task runs EVERY periodic callback in
+# this firmware (telemetry sampling, profile curve follower, session
+# snapshot, duration/fan watchdogs, and the web dashboard's WS broadcaster) -
+# the IDF default (3584 bytes) overflowed once the WS broadcaster needed a
+# ~1.3KB JSON buffer, crashing/rebooting the board. Bumped for headroom.
+CONFIG_ESP_TIMER_TASK_STACK_SIZE=6144
+
+# Diagnostics web page (web_api/diagnostics_routes.c) lists every FreeRTOS
+# task's stack high-water-mark usage via uxTaskGetSystemState(), which
+# requires the trace facility.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+
+# Web dashboard tabs each hold a long-lived WebSocket socket open - default
+# of 10 got tight once combined with the httpd server's own socket use
+# (see web_api/server.c's max_open_sockets=10 + lru_purge_enable).
+CONFIG_LWIP_MAX_SOCKETS=16

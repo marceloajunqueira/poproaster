@@ -1,0 +1,11 @@
+# T002: External component dependencies resolved via the IDF Component Manager.
+# Run `idf.py reconfigure` (or a clean build) after editing this file so the
+# component manager fetches/updates these packages under managed_components/.
+dependencies:
+  eric-c-e/esp_lcd_nv3041: "^0.1.1"
+  espressif/esp_lvgl_port: "^2.0.0"
+  espressif/esp_lcd_touch_gt911: "^1.1.0"
+  lvgl/lvgl: "^8.4.0"
+  joltwallet/littlefs: "^1.14.8"
+  idf:
+    version: ">=5.1"
