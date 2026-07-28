@@ -50,19 +50,20 @@ and are not user-configurable.
 
 ### External peripherals (user-wired via JST1.25 expansion connectors)
 
-The board exposes 4 JST1.25 4-pin expansion connectors. Confirmed physical
-pinout:
+The board exposes 4 JST1.25 4-pin expansion connectors, but **this build
+only uses 3 physical connectors** (P1, P2, P4) — P3 is left entirely
+unused. Confirmed physical pinout:
 
-| Connector | Pin 1 | Pin 2 | Pin 3 | Pin 4 |
-|-----------|-------|-------|-------|-------|
-| P1 | GND | RXD | TXD | +5V |
-| P2 | IO46 | IO9 | IO14 | IO5 |
-| P3 | IO6 | IO7 | IO15 | IO16 |
-| P4 | GND | 3.3V | IO17 | IO18 |
+| Connector | Pin 1 | Pin 2 | Pin 3 | Pin 4 | Used in this build? |
+|-----------|-------|-------|-------|-------|----------------------|
+| P1 | GND | RXD | TXD | +5V | Power IN only (GND + +5V); RXD/TXD left unconnected |
+| P2 | IO46 | IO9 | IO14 | IO5 | Yes — all 4 pins (MAX6675 x3 + SSR) |
+| P3 | IO6 | IO7 | IO15 | IO16 | **Not used** (spare, only 3 connectors on hand) |
+| P4 | GND | 3.3V | IO17 | IO18 | Yes — 3.3V/GND power OUT + fan MOSFET (IO18 spare) |
 
 > **Note:** IO46 is **input-only** on the ESP32-S3 — it must never be
-> assigned to an output signal (SSR, fan PWM). It is used by default for
-> the MAX6675's read-only SO/MISO line.
+> assigned to an output signal (SSR, fan PWM/MOSFET). It is used by default
+> for the MAX6675's read-only SO/MISO line.
 
 Default GPIO assignments (configurable via `idf.py menuconfig` →
 **Pop Roaster Board Configuration** → **External Peripheral GPIOs**, see
@@ -70,14 +71,24 @@ Default GPIO assignments (configurable via `idf.py menuconfig` →
 
 | Signal | Default GPIO | Connector/pin | Notes |
 |--------|--------------|----------------|-------|
-| MAX6675 SCK (clock) | IO5 | P2, pin 4 | |
-| MAX6675 CS (chip select) | IO6 | P3, pin 1 | |
+| MAX6675 SCK (clock) | IO9 | P2, pin 2 | |
+| MAX6675 CS (chip select) | IO14 | P2, pin 3 | |
 | MAX6675 SO / MISO | IO46 | P2, pin 1 | Input-only pin, read-only signal — safe pairing |
-| SSR heater control (on/off) | IO7 | P3, pin 2 | Drives a **40A SSR module** controlling the heating element; time-proportioning (duty cycle) is done in software over this single digital output |
-| Fan PWM control | IO15 | P3, pin 3 | Drives a **15A PWM module** controlling the fan motor; 20kHz default switching frequency (inaudible), LEDC timer 1 / channel 1 |
+| SSR heater control (on/off) | IO5 | P2, pin 4 | Drives a **40A SSR module** controlling the heating element; time-proportioning (duty cycle) is done in software over this single digital output |
+| Fan MOSFET control (PWM) | IO17 | P4, pin 3 | Drives a fan motor **MOSFET module**; 20kHz default switching frequency (inaudible), LEDC timer 1 / channel 1 |
+
+All 3 MAX6675 signals **plus** the SSR live on **P2** (fits exactly: 4
+signals in a 4-pin connector). The fan MOSFET moved to **P4** alongside the
+3.3V/GND power-out pins, which frees **P3 completely** — this build only
+needs 3 physical JST1.25 connectors (P1 power-in, P2, P4) instead of 4.
 
 Spare GPIOs not assigned by default (available for future peripherals, e.g.
-fan RPM feedback): IO9, IO14, IO16, IO17, IO18.
+fan RPM feedback): IO6, IO7, IO15, IO16 (all of unused P3), IO18 (P4).
+
+> **Power note:** power the MAX6675 module from **3.3V** (available on P4,
+> alongside GND), not 5V — its SO/MISO output logic level scales with its
+> supply voltage, and the ESP32-S3's GPIOs are not 5V-tolerant. Running the
+> sensor at 3.3V keeps the SO signal at a safe voltage for `IO46`.
 
 ### Wiring summary
 
@@ -86,14 +97,15 @@ graph LR
     ESP32S3["ESP32-S3<br/>(JC4827W543)"]
     MAX6675["MAX6675<br/>Thermocouple Amp"]
     SSR["40A SSR Module<br/>(heating element)"]
-    FANPWM["15A PWM Module<br/>(fan motor)"]
+    FANPWM["Fan MOSFET Module<br/>(fan motor)"]
 
-    ESP32S3 -- "IO5 (SCK)" --> MAX6675
-    ESP32S3 -- "IO6 (CS)" --> MAX6675
-    MAX6675 -- "IO46 (SO/MISO)" --> ESP32S3
+    ESP32S3 -- "P2: IO9 (SCK)" --> MAX6675
+    ESP32S3 -- "P2: IO14 (CS)" --> MAX6675
+    MAX6675 -- "P2: IO46 (SO/MISO)" --> ESP32S3
+    ESP32S3 -- "P4: 3.3V/GND (power)" --> MAX6675
 
-    ESP32S3 -- "IO7 (on/off)" --> SSR
-    ESP32S3 -- "IO15 (PWM)" --> FANPWM
+    ESP32S3 -- "P2: IO5 (on/off)" --> SSR
+    ESP32S3 -- "P4: IO17 (PWM)" --> FANPWM
 ```
 
 > **Safety:** the SSR and PWM modules switch mains-voltage/high-current
@@ -108,7 +120,9 @@ graph LR
 See [`components/safety/safety_manager.c`](components/safety/safety_manager.c)
 and `specs/001-pop-roaster-control/spec.md` for full details. Highlights:
 
-- Heater requires fan ≥ 30% to be commanded on at all.
+- Fan physical minimum operating duty is 65% (any nonzero request below that is clamped up); turning the fan on from a stop ramps smoothly over ~3s (soft start).
+- Heater requires fan ≥ 65% to be commanded on at all.
+- Heater duty is additionally capped by an operator-configurable "Max Heater Power" setting (Config tab, default 100%).
 - Fan cannot be commanded to 0% while bean temperature ≥ 100°C (or the
   sensor reading is invalid — treated conservatively as "still hot").
 - Sensor-failure detection forces the heater off.

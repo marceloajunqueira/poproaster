@@ -284,7 +284,7 @@ void peripheral_test_show_in(lv_obj_t *parent)
     lv_obj_add_style(note, &s_style_label, LV_PART_MAIN);
     lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(note, content_w - 24);
-    lv_label_set_text(note, "Heater test requires confirmation, auto-raises fan to the 30% floor, and auto-stops after 8s. Leaving this screen always stops any running test.");
+    lv_label_set_text(note, "Heater test requires confirmation, auto-raises fan to the 65% floor, and auto-stops after 8s. Leaving this screen always stops any running test.");
     lv_obj_align(note, LV_ALIGN_TOP_LEFT, 12, 200);
 
     /* Reset any stale state from a previous visit. */

@@ -6,7 +6,8 @@
  * Per the project constitution (Principle I, Safety-First): no component
  * other than this one may command the heater above 0% duty. All hard-fail
  * rules from research.md Decision 4 live here:
- *   1. Heater requires fan >= FAN_MIN_PCT_DURING_HEAT (30%, fixed).
+ *   1. Heater requires fan >= FAN_MIN_PCT_DURING_HEAT (65%, fixed - this is
+ *      the fan's own physical minimum operating duty, see hal/fan_pwm.h).
  *   2. Absolute temperature cutoff at 260C (warning at 240C).
  *   3. Sensor failure -> heater forced off + critical alarm.
  *   4. Indirect fan-failure (via RoR, see fan_failure_detector.c) -> heater
@@ -16,6 +17,11 @@
  *   6. Dedicated Emergency Stop -> immediate heater off, always available.
  *   7. Critical alarms require manual acknowledgment (FR-029) before the
  *      roast may continue.
+ *   8. Operator-configurable Max Heater Power cap (0-100%, persisted to
+ *      NVS, default 100% i.e. no extra cap) - applied as a final clamp on
+ *      top of whatever duty the PID/profile/manual command requested, so a
+ *      too-strong resistive element can be limited without touching the
+ *      control algorithm itself.
  */
 #pragma once
 
@@ -23,11 +29,12 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-#define SAFETY_FAN_MIN_PCT_DURING_HEAT   30    /* FR-004: fixed, not configurable. */
+#define SAFETY_FAN_MIN_PCT_DURING_HEAT   65    /* Fixed: fan's own physical minimum operating duty (hal/fan_pwm.h) - not configurable. */
 #define SAFETY_TEMP_WARNING_C            240.0f /* FR-026 */
 #define SAFETY_TEMP_ABSOLUTE_CUTOFF_C    260.0f /* FR-026 */
 #define SAFETY_DEFAULT_MAX_DURATION_MS   (25 * 60 * 1000) /* FR-033 default 25 min. */
 #define SAFETY_FAN_STOP_MIN_TEMP_C       100.0f /* Fan may only be commanded fully OFF (0%) once BT is below this - since roast profiles can now configure their own Cooling segment/duration, this stops a badly-configured (or cancelled-early) profile from cutting airflow while the heating element/chamber is still hot. */
+#define SAFETY_MAX_HEATER_POWER_DEFAULT_PCT 100 /* Default cap: no extra limit beyond 100%. */
 
 typedef enum {
     SAFETY_ALARM_NONE = 0,
@@ -56,9 +63,23 @@ esp_err_t safety_manager_request_fan_pct(uint8_t pct, safety_cmd_source_t source
 /**
  * Validates and applies a heater duty request. Rejects if the fan is not
  * currently at/above the safety floor, if there's an unacknowledged critical
- * alarm, or if the last temperature reading was invalid.
+ * alarm, or if the last temperature reading was invalid. The requested
+ * duty is also clamped to the configured Max Heater Power cap (see
+ * safety_manager_set_max_heater_power_pct()) before being applied.
  */
 esp_err_t safety_manager_request_heater_pct(uint8_t pct, safety_cmd_source_t source);
+
+/**
+ * Operator-configurable ceiling (0-100%) on the heater duty cycle this
+ * module will ever apply, regardless of what the PID/profile/manual
+ * command asked for - persisted to NVS (survives reboot). Defaults to
+ * SAFETY_MAX_HEATER_POWER_DEFAULT_PCT (100%, i.e. no extra cap) until
+ * explicitly configured. Values above 100 are clamped to 100.
+ */
+esp_err_t safety_manager_set_max_heater_power_pct(uint8_t pct);
+
+/** Returns the currently configured Max Heater Power cap (see safety_manager_set_max_heater_power_pct()). */
+uint8_t safety_manager_get_max_heater_power_pct(void);
 
 /** Feeds the latest validated temperature sample; drives the 260C/240C cutoff and sensor-failure checks. */
 void safety_manager_on_temperature_sample(float bean_temp_c, bool sensor_valid);

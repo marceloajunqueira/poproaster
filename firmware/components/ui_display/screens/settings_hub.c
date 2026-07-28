@@ -10,6 +10,7 @@
 #include "ui_display/screens/peripheral_test.h"
 #include "ui_display/screens/sensor_calibration.h"
 #include "ui_display/screens/wifi_setup.h"
+#include "ui_display/screens/heater_settings.h"
 #include "ui_display/screens/settings_hub.h"
 
 static const char *TAG = "settings_hub";
@@ -62,6 +63,16 @@ static void wifi_setup_btn_event_cb(lv_event_t *e)
     lv_obj_t *parent = (lv_obj_t *)lv_event_get_user_data(e);
     lv_obj_clean(parent);
     wifi_setup_show_in(parent);
+}
+
+static void heater_settings_btn_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    lv_obj_t *parent = (lv_obj_t *)lv_event_get_user_data(e);
+    lv_obj_clean(parent);
+    heater_settings_show_in(parent);
 }
 
 /* T055: cycles EN -> PT -> ES -> EN, persists the choice (i18n_set_language()
@@ -119,7 +130,7 @@ static void build_menu(lv_obj_t *parent)
     const lv_coord_t content_w = lv_obj_get_width(parent);
     const lv_coord_t col_w = (content_w - (2 * GRID_MARGIN) - GRID_GAP) / GRID_COLS;
     const lv_coord_t col_x[GRID_COLS] = {GRID_MARGIN, GRID_MARGIN + col_w + GRID_GAP};
-    const lv_coord_t row_y[2] = {36, 36 + TILE_HEIGHT + GRID_GAP};
+    const lv_coord_t row_y[3] = {36, 36 + TILE_HEIGHT + GRID_GAP, 36 + 2 * (TILE_HEIGHT + GRID_GAP)};
 
     lv_obj_t *title = lv_label_create(parent);
     lv_obj_add_style(title, &s_style_title, LV_PART_MAIN);
@@ -132,10 +143,12 @@ static void build_menu(lv_obj_t *parent)
                     sensor_calibration_btn_event_cb, parent);
     make_grid_tile(parent, col_x[0], row_y[1], col_w, LV_SYMBOL_WIFI, i18n_get(I18N_KEY_WIFI_SETUP),
                     wifi_setup_btn_event_cb, parent);
+    make_grid_tile(parent, col_x[1], row_y[1], col_w, LV_SYMBOL_CHARGE, "Max Heater Power",
+                    heater_settings_btn_event_cb, parent);
 
     char lang_buf[40];
     snprintf(lang_buf, sizeof(lang_buf), "%s: %s", i18n_get(I18N_KEY_LANGUAGE), i18n_get_language_code(i18n_get_language()));
-    lv_obj_t *lang_btn = make_grid_tile(parent, col_x[1], row_y[1], col_w, LV_SYMBOL_KEYBOARD, lang_buf,
+    lv_obj_t *lang_btn = make_grid_tile(parent, col_x[0], row_y[2], col_w, LV_SYMBOL_KEYBOARD, lang_buf,
                                          language_btn_event_cb, parent);
     s_lang_btn_label = lv_obj_get_child(lang_btn, 0);
 }
@@ -157,4 +170,5 @@ void settings_hub_hide(void)
      * screen isn't the one currently active (nothing to tear down). */
     peripheral_test_hide();
     sensor_calibration_hide();
+    heater_settings_hide();
 }

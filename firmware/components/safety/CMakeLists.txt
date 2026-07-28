@@ -9,4 +9,5 @@ idf_component_register(
         roaster_hal
         roast_core
         esp_timer
+        storage
 )

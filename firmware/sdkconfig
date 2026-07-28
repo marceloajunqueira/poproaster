@@ -3663,19 +3663,19 @@ CONFIG_POPROASTER_BOARD_NAME="jc4827w543"
 #
 
 #
-#   P1: GND, RXD, TXD, +5V           (UART/power - not general purpose GPIO)
+#   P1: GND, RXD, TXD, +5V           (power IN only in this build - RXD/TXD left unconnected, no GPIO used here)
 #
 
 #
-#   P2: IO46, IO9, IO14, IO5
+#   P2: IO46, IO9, IO14, IO5         (MAX6675 SO/SCK/CS + SSR heater - fully used)
 #
 
 #
-#   P3: IO6, IO7, IO15, IO16
+#   P3: IO6, IO7, IO15, IO16         (UNUSED in this build - only 3 physical connectors available)
 #
 
 #
-#   P4: GND, 3.3V, IO17, IO18
+#   P4: GND, 3.3V, IO17, IO18        (3.3V+GND power OUT for MAX6675, IO17 = fan MOSFET control)
 #
 
 #
@@ -3683,18 +3683,22 @@ CONFIG_POPROASTER_BOARD_NAME="jc4827w543"
 #
 
 #
-# Spare GPIOs not assigned by default (available for future peripherals, e.g. fan RPM feedback): IO9, IO14, IO16, IO17, IO18
+# This build skips P3 entirely (only 3 physical JST1.25 connectors on hand) - all 4 GPIO signals fit across P2 (3 MAX6675 + SSR) and P4 (fan MOSFET), with P1 carrying only +5V/GND power in.
+#
+
+#
+# Spare GPIOs not assigned by default (available for future peripherals): IO6, IO7, IO15, IO16 (all of unused P3), IO18 (P4)
 #
 # default:
-CONFIG_POPROASTER_MAX6675_SCK_GPIO=5
+CONFIG_POPROASTER_MAX6675_SCK_GPIO=9
 # default:
-CONFIG_POPROASTER_MAX6675_CS_GPIO=6
+CONFIG_POPROASTER_MAX6675_CS_GPIO=14
 # default:
 CONFIG_POPROASTER_MAX6675_SO_GPIO=46
 # default:
-CONFIG_POPROASTER_SSR_HEATER_GPIO=7
+CONFIG_POPROASTER_SSR_HEATER_GPIO=5
 # default:
-CONFIG_POPROASTER_FAN_PWM_GPIO=15
+CONFIG_POPROASTER_FAN_PWM_GPIO=17
 # default:
 CONFIG_POPROASTER_FAN_PWM_LEDC_TIMER=1
 # default:

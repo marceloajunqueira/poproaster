@@ -19,25 +19,28 @@ menu "Pop Roaster Board Configuration"
 
     menu "External Peripheral GPIOs (JST1.25 expansion connectors)"
         comment "Confirmed physical pinout on this JC4827W543 unit (4-pin JST1.25 connectors, in connection order):"
-        comment "  P1: GND, RXD, TXD, +5V           (UART/power - not general purpose GPIO)"
-        comment "  P2: IO46, IO9, IO14, IO5"
-        comment "  P3: IO6, IO7, IO15, IO16"
-        comment "  P4: GND, 3.3V, IO17, IO18"
+        comment "  P1: GND, RXD, TXD, +5V           (power IN only in this build - RXD/TXD left unconnected, no GPIO used here)"
+        comment "  P2: IO46, IO9, IO14, IO5         (MAX6675 SO/SCK/CS + SSR heater - fully used)"
+        comment "  P3: IO6, IO7, IO15, IO16         (UNUSED in this build - only 3 physical connectors available)"
+        comment "  P4: GND, 3.3V, IO17, IO18        (3.3V+GND power OUT for MAX6675, IO17 = fan MOSFET control)"
         comment "NOTE: IO46 is INPUT-ONLY on ESP32-S3 (cannot drive outputs) - assigned below to MAX6675 SO/MISO, which is a read-only signal from the MCU's perspective. Do not assign IO46 to SSR or Fan PWM (both require output-capable pins)."
-        comment "Spare GPIOs not assigned by default (available for future peripherals, e.g. fan RPM feedback): IO9, IO14, IO16, IO17, IO18"
+        comment "This build skips P3 entirely (only 3 physical JST1.25 connectors on hand) - all 4 GPIO signals fit across P2 (3 MAX6675 + SSR) and P4 (fan MOSFET), with P1 carrying only +5V/GND power in."
+        comment "Spare GPIOs not assigned by default (available for future peripherals): IO6, IO7, IO15, IO16 (all of unused P3), IO18 (P4)"
 
         config POPROASTER_MAX6675_SCK_GPIO
             int "MAX6675 SCK (clock) GPIO"
-            default 5
+            default 9
             help
                 SPI-like clock pin driving the MAX6675 thermocouple amplifier.
-                Default: IO5 (P2, 4th pin).
+                Default: IO9 (P2, 2nd pin). Kept alongside SO/CS on the same
+                P2 connector so all 3 MAX6675 signals share one connector and
+                P3 is left free for SSR + Fan only.
 
         config POPROASTER_MAX6675_CS_GPIO
             int "MAX6675 CS (chip select) GPIO"
-            default 6
+            default 14
             help
-                Default: IO6 (P3, 1st pin).
+                Default: IO14 (P2, 3rd pin). Kept on P2 (see SCK above).
 
         config POPROASTER_MAX6675_SO_GPIO
             int "MAX6675 SO / MISO (serial out) GPIO"
@@ -49,20 +52,23 @@ menu "Pop Roaster Board Configuration"
 
         config POPROASTER_SSR_HEATER_GPIO
             int "SSR heater control GPIO (1 pin, on/off)"
-            default 7
+            default 5
             help
                 Drives the 40A SSR module controlling the heating element.
                 Time-proportioning (duty cycle) is handled in software; this
-                is a single digital output pin. Default: IO7 (P3, 2nd pin).
+                is a single digital output pin. Default: IO5 (P2, 4th pin) -
+                shares P2 with the 3 MAX6675 signals so P3 can be left
+                entirely unused (only 3 physical JST1.25 connectors on hand).
                 Must be an output-capable pin (do NOT use IO46 here).
 
         config POPROASTER_FAN_PWM_GPIO
             int "Fan PWM control GPIO"
-            default 15
+            default 17
             help
-                Drives the 15A PWM module controlling the fan motor.
-                Default: IO15 (P3, 3rd pin). Must be an output-capable pin
-                (do NOT use IO46 here).
+                Drives the fan motor's MOSFET control module.
+                Default: IO17 (P4, 3rd pin) - P4 also carries 3.3V/GND power
+                OUT (to feed the MAX6675 sensor) on its other 2 pins. Must be
+                an output-capable pin (do NOT use IO46 here).
 
         config POPROASTER_FAN_PWM_LEDC_TIMER
             int "Fan PWM LEDC timer index (0-3)"

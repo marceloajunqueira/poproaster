@@ -28,7 +28,7 @@ void heater_pid_reset(void);
  * Computes the next heater duty cycle (0-100%) to drive `measured_temp_c`
  * toward `target_temp_c`, given `dt_s` seconds elapsed since the previous
  * call. Output is clamped to [0, 100] with anti-windup on the integral
- * term; the Safety Manager still has the final say (30% fan floor,
+ * term; the Safety Manager still has the final say (65% fan floor,
  * absolute cutoff, etc.) once this value reaches command_dispatcher.
  */
 uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s);

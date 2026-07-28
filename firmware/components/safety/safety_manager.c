@@ -8,13 +8,17 @@
 #include "hal/ssr_heater.h"
 #include "hal/fan_pwm.h"
 #include "roast_core/session_state_machine.h"
+#include "storage/nvs_store.h"
 
 static const char *TAG = "safety_manager";
+
+#define NVS_KEY_MAX_HEATER_POWER "max_heat_pct"
 
 static safety_alarm_type_t s_active_alarm = SAFETY_ALARM_NONE;
 static bool s_alarm_needs_ack = false;
 static bool s_last_sensor_valid = false;
 static float s_last_bean_temp_c = 0.0f;
+static uint8_t s_max_heater_power_pct = SAFETY_MAX_HEATER_POWER_DEFAULT_PCT;
 
 static void raise_critical_alarm(safety_alarm_type_t alarm, const char *reason)
 {
@@ -32,8 +36,21 @@ esp_err_t safety_manager_init(void)
     s_active_alarm = SAFETY_ALARM_NONE;
     s_alarm_needs_ack = false;
     s_last_sensor_valid = false;
-    ESP_LOGI(TAG, "Safety Manager init OK (fan floor=%d%%, cutoff=%.0fC, warn=%.0fC)",
-             SAFETY_FAN_MIN_PCT_DURING_HEAT, SAFETY_TEMP_ABSOLUTE_CUTOFF_C, SAFETY_TEMP_WARNING_C);
+
+    int32_t stored_max_heater_pct = SAFETY_MAX_HEATER_POWER_DEFAULT_PCT;
+    if (nvs_store_get_i32(NVS_KEY_MAX_HEATER_POWER, &stored_max_heater_pct) != ESP_OK) {
+        stored_max_heater_pct = SAFETY_MAX_HEATER_POWER_DEFAULT_PCT;
+    }
+    if (stored_max_heater_pct < 0) {
+        stored_max_heater_pct = 0;
+    } else if (stored_max_heater_pct > 100) {
+        stored_max_heater_pct = 100;
+    }
+    s_max_heater_power_pct = (uint8_t)stored_max_heater_pct;
+
+    ESP_LOGI(TAG, "Safety Manager init OK (fan floor=%d%%, cutoff=%.0fC, warn=%.0fC, max heater power=%d%%)",
+             SAFETY_FAN_MIN_PCT_DURING_HEAT, SAFETY_TEMP_ABSOLUTE_CUTOFF_C, SAFETY_TEMP_WARNING_C,
+             s_max_heater_power_pct);
     return ESP_OK;
 }
 
@@ -57,7 +74,7 @@ esp_err_t safety_manager_request_fan_pct(uint8_t pct, safety_cmd_source_t source
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* FR-004: while heating, never allow the fan below the fixed 30% floor. */
+    /* Fan floor while heating - the fixed physical minimum operating duty. */
     if (ssr_heater_get_duty_pct() > 0 && pct < SAFETY_FAN_MIN_PCT_DURING_HEAT) {
         ESP_LOGW(TAG, "Fan request %d%% from source=%d rejected: below %d%% floor while heating",
                  pct, (int)source, SAFETY_FAN_MIN_PCT_DURING_HEAT);
@@ -87,9 +104,33 @@ esp_err_t safety_manager_request_heater_pct(uint8_t pct, safety_cmd_source_t sou
                      pct, (int)source);
             return ESP_ERR_INVALID_STATE;
         }
+
+        /* Operator-configurable Max Heater Power cap - applied last, after
+         * every other safety check has already passed, so it never masks a
+         * real rejection reason above with a silently-clamped value. */
+        if (pct > s_max_heater_power_pct) {
+            ESP_LOGD(TAG, "Heater request %d%% from source=%d clamped to Max Heater Power cap (%d%%)",
+                     pct, (int)source, s_max_heater_power_pct);
+            pct = s_max_heater_power_pct;
+        }
     }
 
     return ssr_heater_set_duty_pct(pct);
+}
+
+esp_err_t safety_manager_set_max_heater_power_pct(uint8_t pct)
+{
+    if (pct > 100) {
+        pct = 100;
+    }
+    s_max_heater_power_pct = pct;
+    ESP_LOGI(TAG, "Max Heater Power set to %d%%", pct);
+    return nvs_store_set_i32(NVS_KEY_MAX_HEATER_POWER, (int32_t)pct);
+}
+
+uint8_t safety_manager_get_max_heater_power_pct(void)
+{
+    return s_max_heater_power_pct;
 }
 
 void safety_manager_on_temperature_sample(float bean_temp_c, bool sensor_valid)

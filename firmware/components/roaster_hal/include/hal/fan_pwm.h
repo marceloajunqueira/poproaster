@@ -17,10 +17,18 @@ esp_err_t fan_pwm_init(void);
 /**
  * Sets the fan speed as a percentage (0-100).
  *
- * NOTE: Like ssr_heater_set_duty_pct(), this does not enforce the 30% fixed
- * safety floor during heating (FR-004) - only the Safety Manager may call
- * this with a value below the floor while the heater is active is REJECTED
- * upstream; this driver only stores the electrical PWM duty being requested.
+ * - Any nonzero request below the fan's physical minimum operating duty
+ *   (65%) is clamped up to that floor - the motor doesn't reliably spin at
+ *   lower duty cycles.
+ * - Turning the fan ON from a full stop (0 -> nonzero) ramps smoothly to the
+ *   target duty over ~3 seconds (soft start, avoids a hard power-supply
+ *   inrush); adjusting an already-running fan's speed, or turning it off,
+ *   is instantaneous.
+ *
+ * NOTE: Like ssr_heater_set_duty_pct(), this does not enforce the safety-
+ * critical fan floor during heating (FR-004) - only the Safety Manager may
+ * enforce that; this driver only applies the two hardware-level rules above
+ * to whatever duty is requested.
  */
 esp_err_t fan_pwm_set_pct(uint8_t pct);
 

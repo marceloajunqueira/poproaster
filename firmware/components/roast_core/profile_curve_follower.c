@@ -105,7 +105,7 @@ static void drive_heating_segment(uint32_t elapsed_s, uint8_t segment_idx)
     }
 
     /* Fan first, then heater - Safety Manager rejects heater > 0 unless fan
-     * is already at/above the 30% floor. */
+     * is already at/above the 65% floor. */
     command_dispatcher_set_fan_pct(target_fan, SAFETY_CMD_SOURCE_PROFILE_CURVE);
     command_dispatcher_set_heater_pct(target_heater, SAFETY_CMD_SOURCE_PROFILE_CURVE);
     s_last_written_fan = target_fan;
@@ -163,7 +163,7 @@ static void drive_cooling(uint32_t elapsed_s, bool within_profile_cooling_segmen
  * temperature the operator set via profile_curve_follower_set_manual_target_temp_c()
  * (Manual screen's "Target Temp" slider) - fan is left entirely to the
  * operator's own Fan slider/command. Operator-reported bug: requesting
- * heat while the fan was left off did nothing (Safety Manager's 30% floor
+ * heat while the fan was left off did nothing (Safety Manager's 65% floor
  * silently rejected it) - auto-raises the fan to that floor here instead,
  * whenever the PID actually wants to apply heat. */
 static void drive_manual_heater(void)

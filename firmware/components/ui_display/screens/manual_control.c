@@ -9,6 +9,7 @@
 #include "roast_core/command_dispatcher.h"
 #include "roast_core/roast_telemetry_service.h"
 #include "roast_core/profile_curve_follower.h"
+#include "roast_core/session_state_machine.h"
 #include "ui_display/screens/manual_control.h"
 
 static const char *TAG = "manual_control";
@@ -19,6 +20,7 @@ static lv_obj_t *s_target_label;
 static lv_obj_t *s_fan_slider;
 static lv_obj_t *s_target_slider;
 static lv_obj_t *s_heater_status_label;
+static lv_obj_t *s_control_note_label;
 static lv_timer_t *s_refresh_timer;
 
 static lv_style_t s_style_title;
@@ -87,7 +89,7 @@ static void fan_slider_event_cb(lv_event_t *e)
  * Manual mode - the operator only picks a target BEAN TEMPERATURE, and
  * profile_curve_follower.c's closed-loop PID drives the actual heater duty
  * automatically toward it (same controller Profile mode uses), auto-
- * raising the fan to the 30% floor first if it was left off. */
+ * raising the fan to the 65% floor first if it was left off. */
 static void target_slider_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_RELEASED) {
@@ -141,6 +143,31 @@ static void refresh_timer_cb(lv_timer_t *timer)
         snprintf(buf, sizeof(buf), "Temp: -- / Heater: %d%%", snap.heater_pct);
     }
     lv_label_set_text(s_heater_status_label, buf);
+
+    /* Operator-reported confusion: setting Target Temp appeared to do
+     * nothing ("Heater ficou em 0%, nao liga nunca"). Root causes are all
+     * silent preconditions the operator has no visibility into otherwise:
+     * no active session yet, a Profile preset silently taking over control
+     * (Target Temp below only applies in Manual/Artisan mode), or Cooling
+     * forcing the heater off regardless. Surface the actual reason here so
+     * it's obvious at a glance instead of just showing a stuck 0%. */
+    const roast_session_t *session = session_sm_get_state();
+    if (session->phase == ROAST_PHASE_IDLE || session->phase == ROAST_PHASE_COMPLETED ||
+        session->phase == ROAST_PHASE_ABORTED) {
+        lv_label_set_text(s_control_note_label,
+                           "No active roast - press Start Roast (Roast tab) before Target Temp has any effect.");
+    } else if (session->control_mode == ROAST_MODE_PROFILE) {
+        lv_label_set_text(s_control_note_label,
+                           "A Profile preset is controlling the heater right now - Target Temp below is ignored. "
+                           "Cancel the session and pick no preset (Presets tab) to use Manual mode instead.");
+    } else if (session->phase == ROAST_PHASE_COOLING) {
+        lv_label_set_text(s_control_note_label, "Cooling - heater stays off regardless of Target Temp.");
+    } else if (session->paused) {
+        lv_label_set_text(s_control_note_label, "Session paused - heater control is frozen until resumed.");
+    } else {
+        lv_label_set_text(s_control_note_label,
+                           "Heater is automatic (PID to Target Temp); fan auto-raises to the 65% floor if needed.");
+    }
 }
 
 void manual_control_show_in(lv_obj_t *parent)
@@ -207,8 +234,9 @@ void manual_control_show_in(lv_obj_t *parent)
     lv_obj_add_style(note, &s_style_label, LV_PART_MAIN);
     lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(note, slider_w);
-    lv_label_set_text(note, "Heater is automatic (PID to Target Temp); fan auto-raises to the 30% floor if needed.");
+    lv_label_set_text(note, "Heater is automatic (PID to Target Temp); fan auto-raises to the 65% floor if needed.");
     lv_obj_align(note, LV_ALIGN_TOP_LEFT, slider_margin, 212);
+    s_control_note_label = note;
 
     if (s_refresh_timer != NULL) {
         lv_timer_del(s_refresh_timer);
