@@ -29,7 +29,7 @@
  * direct setpoint, command_dispatcher_set_fan_pct()); the SAME closed-loop
  * PID used for Profile mode drives the heater toward that target
  * automatically. If the operator wants heat but left the fan below the
- * fixed 65% floor, it's auto-raised to that floor instead of the heater
+ * fixed 60% (Level 1) floor, it's auto-raised to that floor instead of the heater
  * request just silently being rejected.
  */
 #pragma once

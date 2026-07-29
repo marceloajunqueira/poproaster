@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include "esp_log.h"
 
+#include "hal/fan_pwm.h"
 #include "web_api/presets_routes.h"
 #include "web_api/dashboard_routes.h"
 #include "storage/profile_store.h"
@@ -429,11 +430,15 @@ static esp_err_t presets_save_post_handler(httpd_req_t *req)
             pt->target_temp_c = ROAST_PROFILE_COOLING_TEMP_C;
             pt->target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT;
         } else {
-            if (fan < ROAST_PROFILE_FAN_MIN_PCT) {
-                fan = ROAST_PROFILE_FAN_MIN_PCT; /* FR-004 fan floor, same clamp as the display editor. */
+            /* Fan is quantized to 5 discrete levels (60/70/80/90/100%, see
+             * hal/fan_pwm.h) - snap whatever the client sent to the nearest
+             * one, never below Level 1, same rule as the display editor. */
+            uint8_t fan_level = fan_pwm_pct_to_level((uint8_t)(fan > 255 ? 255 : fan));
+            if (fan_level < 1) {
+                fan_level = 1;
             }
             pt->target_temp_c = temp;
-            pt->target_fan_pct = (uint8_t)fan;
+            pt->target_fan_pct = fan_pwm_level_to_pct(fan_level);
         }
     }
     roast_profile_ensure_trailing_cooling(&profile); /* Defensive - should already conform given the above. */
@@ -600,7 +605,14 @@ static esp_err_t presets_import_post_handler(httpd_req_t *req)
             pt->target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT;
         } else {
             pt->target_temp_c = (temp < 0.0f) ? 0.0f : (temp > 260.0f ? 260.0f : temp);
-            pt->target_fan_pct = (uint8_t)((fan < ROAST_PROFILE_FAN_MIN_PCT) ? ROAST_PROFILE_FAN_MIN_PCT : (fan > 100 ? 100 : fan));
+            /* Fan is quantized to 5 discrete levels (60/70/80/90/100%, see
+             * hal/fan_pwm.h) - snap the imported value to the nearest one,
+             * never below Level 1. */
+            uint8_t fan_level = fan_pwm_pct_to_level((uint8_t)(fan > 255 ? 255 : fan));
+            if (fan_level < 1) {
+                fan_level = 1;
+            }
+            pt->target_fan_pct = fan_pwm_level_to_pct(fan_level);
         }
         count++;
 

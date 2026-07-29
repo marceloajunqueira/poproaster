@@ -28,10 +28,22 @@ static const char *TAG = "max6675";
 #define MAX6675_MIN_PLAUSIBLE_C (-10.0f)
 #define MAX6675_MAX_PLAUSIBLE_C (350.0f)
 
+/* Operator report: raw readings jitter roughly +-3C at this fast (~2Hz)
+ * sample rate - noticeably noisier than useful for a stable-looking BT
+ * readout/PID input. Exponential moving average smooths this out; lower
+ * alpha = smoother/slower to react, higher = snappier/noisier. 0.25 cuts
+ * jitter substantially while still tracking a real multi-minute roast
+ * curve with only a couple of seconds of extra lag - a good tradeoff given
+ * this sensor's own thermal lag (see heater_pid.c) already dominates
+ * response time far more than this filter's small additional smoothing. */
+#define MAX6675_EMA_ALPHA 0.25f
+
 static spi_device_handle_t s_spi_dev;
 static float s_calibration_offset_c = 0.0f;
 static int64_t s_last_valid_read_ms = 0;
 static bool s_initialized = false;
+static float s_smoothed_temp_c = 0.0f;
+static bool s_smoothed_has_value = false;
 
 esp_err_t max6675_init(void)
 {
@@ -114,14 +126,31 @@ esp_err_t max6675_read(max6675_sample_t *out_sample)
     if (thermocouple_open) {
         out_sample->bean_temp_c = 0.0f;
         out_sample->quality = MAX6675_QUALITY_DISCONNECTED;
+        s_smoothed_has_value = false; /* don't let a stale average leak across a real disconnect */
         return ESP_OK;
     }
 
     if (calibrated_temp_c < MAX6675_MIN_PLAUSIBLE_C || calibrated_temp_c > MAX6675_MAX_PLAUSIBLE_C) {
         out_sample->bean_temp_c = calibrated_temp_c;
         out_sample->quality = MAX6675_QUALITY_OUT_OF_RANGE;
+        s_smoothed_has_value = false;
         return ESP_OK;
     }
+
+    /* Exponential moving average smoothing (operator report: raw readings
+     * jitter ~+-3C at this sample rate) - applied only to genuinely valid,
+     * in-range readings so a disconnect/garbage sample never gets blended
+     * in. Reset (via s_smoothed_has_value=false above/on calibration
+     * change) whenever continuity can't be trusted, so the filter always
+     * re-seeds fresh from the very next good reading instead of slowly
+     * dragging an old average back into range. */
+    if (!s_smoothed_has_value) {
+        s_smoothed_temp_c = calibrated_temp_c;
+        s_smoothed_has_value = true;
+    } else {
+        s_smoothed_temp_c += MAX6675_EMA_ALPHA * (calibrated_temp_c - s_smoothed_temp_c);
+    }
+    calibrated_temp_c = s_smoothed_temp_c;
 
     int64_t now_ms = out_sample->timestamp_ms;
     if (s_last_valid_read_ms != 0 && (now_ms - s_last_valid_read_ms) > MAX6675_STALE_MS) {
@@ -140,6 +169,10 @@ esp_err_t max6675_read(max6675_sample_t *out_sample)
 esp_err_t max6675_set_calibration_offset(float offset_c)
 {
     s_calibration_offset_c = offset_c;
+    /* A calibration change is an instant step in the baseline - let the EMA
+     * filter re-seed fresh from the next reading instead of slowly
+     * blending toward the new offset over several samples. */
+    s_smoothed_has_value = false;
     return nvs_store_set_float("max6675_offset", offset_c);
 }
 

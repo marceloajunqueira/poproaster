@@ -120,9 +120,18 @@ graph LR
 See [`components/safety/safety_manager.c`](components/safety/safety_manager.c)
 and `specs/001-pop-roaster-control/spec.md` for full details. Highlights:
 
-- Fan physical minimum operating duty is 65% (any nonzero request below that is clamped up); turning the fan on from a stop ramps smoothly over ~3s (soft start).
-- Heater requires fan ≥ 65% to be commanded on at all.
-- Heater duty is additionally capped by an operator-configurable "Max Heater Power" setting (Config tab, default 100%).
+- Fan speed is quantized to 5 discrete levels (Level 1-5 = 60/70/80/90/100%;
+  Level 0 = off) - the motor doesn't behave predictably at arbitrary
+  percentages; turning the fan on from a stop ramps smoothly over ~2s
+  (soft start). The heater is only allowed on once the fan's REAL (live,
+  interpolated) duty during that ramp has actually reached the floor, not
+  just once the ramp was requested. Emergency Stop cuts the fan
+  immediately, bypassing this.
+- Heater requires fan ≥ Level 1 (60%) to be commanded on at all.
+- Heater duty is additionally scaled by an operator-configurable "Max
+  Heater Power" setting (Config tab, default 100%) - a linear proportional
+  scale, not just a ceiling (e.g. at 50%, a requested 40% duty really only
+  reaches 20%).
 - Fan cannot be commanded to 0% while bean temperature ≥ 100°C (or the
   sensor reading is invalid — treated conservatively as "still hot").
 - Sensor-failure detection forces the heater off.

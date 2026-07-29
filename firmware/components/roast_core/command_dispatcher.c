@@ -79,12 +79,11 @@ esp_err_t command_dispatcher_emergency_stop(safety_cmd_source_t source)
      * active session to begin with. */
     session_sm_abort("Emergency Stop activated");
 
-    /* Best-effort attempt to fully stop the fan too - the alarm this just
-     * raised requires acknowledgment first (safety_manager_request_fan_pct
-     * rejects ANY fan command while unacknowledged), so in practice this
-     * only takes effect after the operator acks the alarm and it's already
-     * safe to do so; harmless no-op otherwise. */
-    command_dispatcher_set_fan_pct(0, source);
+    /* NOTE: the fan is already force-killed directly inside
+     * safety_manager_emergency_stop() (bypassing the usual
+     * safety_manager_request_fan_pct() anti-scorch gate) - Emergency Stop
+     * is meant to cut everything at once, unlike other alarms which
+     * deliberately leave the fan running. No extra fan command needed here. */
 
     return err;
 }

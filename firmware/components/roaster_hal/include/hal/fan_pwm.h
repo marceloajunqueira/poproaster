@@ -11,17 +11,25 @@
 #include <stdint.h>
 #include "esp_err.h"
 
+/** Number of discrete fan levels, including 0 (off): 0,1,2,3,4,5. */
+#define FAN_PWM_LEVEL_COUNT 6
+/** Highest valid discrete fan level (5 = 100%). */
+#define FAN_PWM_LEVEL_MAX 5
+
 /** Initializes the LEDC timer/channel driving the fan PWM output. */
 esp_err_t fan_pwm_init(void);
 
 /**
  * Sets the fan speed as a percentage (0-100).
  *
- * - Any nonzero request below the fan's physical minimum operating duty
- *   (65%) is clamped up to that floor - the motor doesn't reliably spin at
- *   lower duty cycles.
+ * - Operator report: the fan motor only behaves predictably at a handful of
+ *   discrete speeds, not arbitrary percentages - any nonzero request is
+ *   snapped to the nearest of the 5 fixed levels (60/70/80/90/100%, see
+ *   fan_pwm_level_to_pct()); a request that would round down to "off" is
+ *   instead raised to the lowest nonzero level (60%) - a deliberate nonzero
+ *   request must never silently become 0%.
  * - Turning the fan ON from a full stop (0 -> nonzero) ramps smoothly to the
- *   target duty over ~3 seconds (soft start, avoids a hard power-supply
+ *   target duty over ~2 seconds (soft start, avoids a hard power-supply
  *   inrush); adjusting an already-running fan's speed, or turning it off,
  *   is instantaneous.
  *
@@ -32,5 +40,46 @@ esp_err_t fan_pwm_init(void);
  */
 esp_err_t fan_pwm_set_pct(uint8_t pct);
 
-/** Returns the last commanded fan speed percentage. */
+/**
+ * Returns the CURRENT REAL fan speed percentage - while a soft-start ramp
+ * is in progress, this is a live interpolated value (matching the
+ * hardware's own linear fade), not the eventual target. Used by the Safety
+ * Manager's fan-floor check so the heater can't turn on before the fan has
+ * ACTUALLY reached the required speed.
+ */
 uint8_t fan_pwm_get_pct(void);
+
+/**
+ * Returns the last commanded fan speed TARGET percentage (post-level-
+ * quantization) - unlike fan_pwm_get_pct(), this does NOT interpolate
+ * during an in-progress ramp; it's always the final value the fan is
+ * heading toward. Intended for callers that need to know "what did I ask
+ * for" regardless of whether the physical ramp has finished yet (e.g.
+ * profile_curve_follower.c's manual-override detection, which must not
+ * mistake its own in-progress ramp for an external override).
+ */
+uint8_t fan_pwm_get_target_pct(void);
+
+/**
+ * Immediately cuts the fan to 0%, bypassing the normal soft-start/level
+ * logic entirely (no fade, no quantization) - for the Emergency Stop path
+ * ONLY (safety_manager_emergency_stop()), which per operator requirement
+ * must cut power to everything at once, unlike other critical alarms that
+ * deliberately leave the fan running for continued safe airflow.
+ */
+esp_err_t fan_pwm_force_off(void);
+
+/**
+ * Converts a discrete fan level (0-FAN_PWM_LEVEL_MAX) to its corresponding
+ * PWM percentage: 0=0%, 1=60%, 2=70%, 3=80%, 4=90%, 5=100%. Levels above
+ * FAN_PWM_LEVEL_MAX are clamped to it.
+ */
+uint8_t fan_pwm_level_to_pct(uint8_t level);
+
+/**
+ * Converts a raw percentage to the nearest discrete fan level (0-5) - used
+ * to display/reconstruct a level from an already-stored/legacy percentage
+ * value (e.g. an older profile segment that predates the discrete-level
+ * model).
+ */
+uint8_t fan_pwm_pct_to_level(uint8_t pct);

@@ -6,6 +6,7 @@
 #include <string.h>
 #include "esp_log.h"
 
+#include "hal/fan_pwm.h"
 #include "storage/profile_store.h"
 #include "ui_display/screens/profile_editor.h"
 #include "ui_display/screens/profile_list.h"
@@ -13,12 +14,14 @@
 static const char *TAG = "profile_editor";
 
 /* Duration steps in whole 15s increments, clamped to a sane [15s, 30min]
- * per-segment range; temp/fan/heater step by 5 within their natural ranges. */
+ * per-segment range; temp steps by 5C. Fan is quantized to 5 discrete
+ * levels (60/70/80/90/100%, see hal/fan_pwm.h) - the stepper below moves
+ * one LEVEL at a time (1-5, never 0 - a non-Cooling segment always needs
+ * the fan on), not an arbitrary percentage. */
 #define DURATION_STEP_S 15
 #define DURATION_MIN_S 15
 #define DURATION_MAX_S 1800
 #define TEMP_STEP_C 5.0f
-#define PCT_STEP 5
 
 typedef enum {
     FIELD_DURATION,
@@ -235,13 +238,15 @@ static void stepper_event_cb(lv_event_t *e)
         break;
     }
     case FIELD_FAN: {
-        int v = (int)pt->target_fan_pct + act->delta;
-        /* FR-004: normal segments must keep fan at/above the fixed floor -
-         * Cooling segments never reach this stepper at all (its fan is
-         * fixed at ROAST_PROFILE_COOLING_FAN_PCT, see build_segment_card()). */
-        if (v < ROAST_PROFILE_FAN_MIN_PCT) v = ROAST_PROFILE_FAN_MIN_PCT;
-        if (v > 100) v = 100;
-        pt->target_fan_pct = (uint8_t)v;
+        /* Fan is quantized to 5 discrete levels (60/70/80/90/100%) - step
+         * by whole levels (delta is -1/+1 here, not a raw percentage), and
+         * never below Level 1 (non-Cooling segments always need the fan
+         * on). Cooling segments never reach this stepper at all (its fan
+         * is fixed at ROAST_PROFILE_COOLING_FAN_PCT, see build_segment_card()). */
+        int level = (int)fan_pwm_pct_to_level(pt->target_fan_pct) + act->delta;
+        if (level < 1) level = 1;
+        if (level > FAN_PWM_LEVEL_MAX) level = FAN_PWM_LEVEL_MAX;
+        pt->target_fan_pct = fan_pwm_level_to_pct((uint8_t)level);
         break;
     }
     }
@@ -425,13 +430,14 @@ static void build_segment_card(lv_obj_t *parent, uint8_t idx, lv_coord_t width)
          * (non-editable) reference text instead of steppers. */
         lv_obj_t *fixed_lbl = lv_label_create(row_b);
         lv_obj_add_style(fixed_lbl, &s_style_stat_label, LV_PART_MAIN);
-        lv_label_set_text(fixed_lbl, "Fixed: 0C, 100% Fan");
+        lv_label_set_text(fixed_lbl, "Fixed: 0C, Fan L5 (100%)");
     } else {
         snprintf(buf, sizeof(buf), "%.0fC", pt->target_temp_c);
         make_stepper(row_b, buf, idx, FIELD_TEMP, -(int16_t)TEMP_STEP_C, (int16_t)TEMP_STEP_C);
 
-        snprintf(buf, sizeof(buf), "%u%%F", (unsigned)pt->target_fan_pct);
-        make_stepper(row_b, buf, idx, FIELD_FAN, -PCT_STEP, PCT_STEP);
+        snprintf(buf, sizeof(buf), "L%u (%u%%)", (unsigned)fan_pwm_pct_to_level(pt->target_fan_pct),
+                 (unsigned)pt->target_fan_pct);
+        make_stepper(row_b, buf, idx, FIELD_FAN, -1, 1);
     }
 }
 

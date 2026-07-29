@@ -14,6 +14,7 @@
 #include "roast_core/roast_events.h"
 #include "roast_core/heater_pid.h"
 #include "storage/profile_store.h"
+#include "hal/fan_pwm.h"
 #include "safety/safety_manager.h"
 #include "roast_core/profile_curve_follower.h"
 
@@ -96,20 +97,31 @@ static void drive_heating_segment(uint32_t elapsed_s, uint8_t segment_idx)
         }
     }
 
-    if (s_last_written_fan >= 0 && (snap.fan_pct != s_last_written_fan || snap.heater_pct != s_last_written_heater)) {
+    if (s_last_written_fan >= 0 &&
+        (fan_pwm_get_target_pct() != (uint8_t)s_last_written_fan ||
+         safety_manager_get_last_requested_heater_pct() != (uint8_t)s_last_written_heater)) {
         ESP_LOGI(TAG, "Manual override detected (fan %d->%d, heater %d->%d) - pausing curve follower until next segment",
-                 s_last_written_fan, snap.fan_pct, s_last_written_heater, snap.heater_pct);
+                 s_last_written_fan, fan_pwm_get_target_pct(), s_last_written_heater,
+                 safety_manager_get_last_requested_heater_pct());
         s_override_active = true;
         s_override_segment_idx = segment_idx;
         return;
     }
 
     /* Fan first, then heater - Safety Manager rejects heater > 0 unless fan
-     * is already at/above the 65% floor. */
-    command_dispatcher_set_fan_pct(target_fan, SAFETY_CMD_SOURCE_PROFILE_CURVE);
-    command_dispatcher_set_heater_pct(target_heater, SAFETY_CMD_SOURCE_PROFILE_CURVE);
-    s_last_written_fan = target_fan;
-    s_last_written_heater = target_heater;
+     * is already at/above the 60% (Level 1) floor. Only remember what was
+     * successfully applied - not merely attempted - so a temporary/
+     * expected rejection (e.g. the fan still soft-start ramping toward
+     * this exact target) doesn't get misread as an external override on
+     * the very next tick. */
+    esp_err_t fan_err = command_dispatcher_set_fan_pct(target_fan, SAFETY_CMD_SOURCE_PROFILE_CURVE);
+    esp_err_t heater_err = command_dispatcher_set_heater_pct(target_heater, SAFETY_CMD_SOURCE_PROFILE_CURVE);
+    if (fan_err == ESP_OK) {
+        s_last_written_fan = target_fan;
+    }
+    if (heater_err == ESP_OK) {
+        s_last_written_heater = target_heater;
+    }
 }
 
 /** Drives ONLY the fan during COOLING (heater is never touched here - it's
@@ -120,9 +132,6 @@ static void drive_heating_segment(uint32_t elapsed_s, uint8_t segment_idx)
 static void drive_cooling(uint32_t elapsed_s, bool within_profile_cooling_segment, uint8_t segment_idx)
 {
     if (within_profile_cooling_segment) {
-        roast_telemetry_snapshot_t snap;
-        roast_telemetry_service_get_snapshot(&snap);
-
         if (s_override_active) {
             if (segment_idx != s_override_segment_idx) {
                 ESP_LOGI(TAG, "Manual override expired at the next Cooling segment - resuming automatic profile control");
@@ -133,15 +142,17 @@ static void drive_cooling(uint32_t elapsed_s, bool within_profile_cooling_segmen
         }
 
         uint8_t target_fan = roast_profile_get_target_fan_pct(&s_profile, elapsed_s);
-        if (s_last_written_fan >= 0 && snap.fan_pct != s_last_written_fan) {
+        if (s_last_written_fan >= 0 && fan_pwm_get_target_pct() != (uint8_t)s_last_written_fan) {
             ESP_LOGI(TAG, "Manual fan override detected during Cooling (%d->%d) - pausing until next segment",
-                     s_last_written_fan, snap.fan_pct);
+                     s_last_written_fan, fan_pwm_get_target_pct());
             s_override_active = true;
             s_override_segment_idx = segment_idx;
             return;
         }
-        command_dispatcher_set_fan_pct(target_fan, SAFETY_CMD_SOURCE_PROFILE_CURVE);
-        s_last_written_fan = target_fan;
+        esp_err_t fan_err = command_dispatcher_set_fan_pct(target_fan, SAFETY_CMD_SOURCE_PROFILE_CURVE);
+        if (fan_err == ESP_OK) {
+            s_last_written_fan = target_fan;
+        }
         return;
     }
 
@@ -163,7 +174,7 @@ static void drive_cooling(uint32_t elapsed_s, bool within_profile_cooling_segmen
  * temperature the operator set via profile_curve_follower_set_manual_target_temp_c()
  * (Manual screen's "Target Temp" slider) - fan is left entirely to the
  * operator's own Fan slider/command. Operator-reported bug: requesting
- * heat while the fan was left off did nothing (Safety Manager's 65% floor
+ * heat while the fan was left off did nothing (Safety Manager's 60% floor
  * silently rejected it) - auto-raises the fan to that floor here instead,
  * whenever the PID actually wants to apply heat. */
 static void drive_manual_heater(void)
@@ -188,7 +199,20 @@ static void follower_timer_cb(void *arg)
     roast_phase_t phase = session->phase;
 
     if (!phase_is_session_active(phase)) {
+        /* No active roast session (IDLE/COMPLETED/ABORTED) - Manual control
+         * (Fan level buttons + Target Temp "Aplicar" on the Manual tab)
+         * must work freely regardless of session state, per operator
+         * requirement: entering Manual mode should never require "Start
+         * Roast" first - the operator may just want direct control, or to
+         * hand off to Artisan, with no formal roast session at all. Drive
+         * the same closed-loop PID toward whatever Target Temp was last
+         * applied (defaults to 0.0f / heater off at boot until the
+         * operator explicitly sets one via the Manual screen). Never treat
+         * this as Profile mode - a stale s_profile_loaded from a previous
+         * session must not linger here. */
+        s_profile_loaded = false;
         s_last_phase = phase;
+        drive_manual_heater();
         return;
     }
 

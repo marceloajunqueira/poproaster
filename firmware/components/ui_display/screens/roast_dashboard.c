@@ -12,6 +12,7 @@
 #include "roast_core/roast_telemetry_service.h"
 #include "roast_core/roast_profile.h"
 #include "roast_core/roast_events.h"
+#include "safety/safety_manager.h"
 #include "storage/profile_store.h"
 #include "storage/session_store.h"
 #include "hal/wifi_provisioning.h"
@@ -951,7 +952,22 @@ static void refresh_timer_cb(lv_timer_t *timer)
     snprintf(buf, sizeof(buf), "Fan: %d%%", snap.fan_pct);
     lv_label_set_text(s_fan_label, buf);
 
-    snprintf(buf, sizeof(buf), "Heater: %d%%", snap.heater_pct);
+    /* Operator-reported confusion ("Max Heater Power nao funcionou"): the
+     * PID/profile control very often requests 100% (it saturates whenever
+     * there's a meaningful positive temperature error, which is most of a
+     * normal heat-up), so under a cap the REAL applied duty
+     * (snap.heater_pct) correctly stays pinned at the cap value the whole
+     * time - which looks identical to a simple ceiling even though it's
+     * genuinely a proportional scale. Show the PID's own logical request
+     * alongside the real value whenever Max Heater Power is actually
+     * scaling them apart, so it's visually obvious the cap IS taking
+     * effect rather than looking broken/stuck. */
+    uint8_t requested_heater_pct = safety_manager_get_last_requested_heater_pct();
+    if (requested_heater_pct != (uint8_t)snap.heater_pct) {
+        snprintf(buf, sizeof(buf), "Heater: %d%% (wants %d%%, capped)", snap.heater_pct, (int)requested_heater_pct);
+    } else {
+        snprintf(buf, sizeof(buf), "Heater: %d%%", snap.heater_pct);
+    }
     lv_label_set_text(s_heater_label, buf);
 
     const char *phase_str = phase_text(snap.phase);

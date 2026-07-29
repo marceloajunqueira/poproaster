@@ -19,6 +19,7 @@ static bool s_alarm_needs_ack = false;
 static bool s_last_sensor_valid = false;
 static float s_last_bean_temp_c = 0.0f;
 static uint8_t s_max_heater_power_pct = SAFETY_MAX_HEATER_POWER_DEFAULT_PCT;
+static uint8_t s_last_requested_heater_pct = 0;
 
 static void raise_critical_alarm(safety_alarm_type_t alarm, const char *reason)
 {
@@ -104,18 +105,26 @@ esp_err_t safety_manager_request_heater_pct(uint8_t pct, safety_cmd_source_t sou
                      pct, (int)source);
             return ESP_ERR_INVALID_STATE;
         }
-
-        /* Operator-configurable Max Heater Power cap - applied last, after
-         * every other safety check has already passed, so it never masks a
-         * real rejection reason above with a silently-clamped value. */
-        if (pct > s_max_heater_power_pct) {
-            ESP_LOGD(TAG, "Heater request %d%% from source=%d clamped to Max Heater Power cap (%d%%)",
-                     pct, (int)source, s_max_heater_power_pct);
-            pct = s_max_heater_power_pct;
-        }
     }
 
-    return ssr_heater_set_duty_pct(pct);
+    /* Operator-configurable Max Heater Power cap acts as a linear HARDWARE
+     * POWER SCALE, not a simple ceiling: e.g. at a 50% cap, a requested
+     * 40% duty is actually applied as 20% real SSR duty, and a requested
+     * 100% becomes 50% - lets an overpowered resistive element be tamed
+     * without the PID/profile itself ever needing to know about it.
+     * Applied last, after every other safety check above has already
+     * passed. A request of 0 scales to 0 either way. */
+    s_last_requested_heater_pct = pct;
+    uint32_t scaled_pct = ((uint32_t)pct * s_max_heater_power_pct) / 100;
+    if (scaled_pct > 100) {
+        scaled_pct = 100;
+    }
+    if (scaled_pct != pct) {
+        ESP_LOGD(TAG, "Heater request %d%% from source=%d scaled to %d%% real duty (Max Heater Power=%d%%)",
+                 pct, (int)source, (int)scaled_pct, s_max_heater_power_pct);
+    }
+
+    return ssr_heater_set_duty_pct((uint8_t)scaled_pct);
 }
 
 esp_err_t safety_manager_set_max_heater_power_pct(uint8_t pct)
@@ -131,6 +140,11 @@ esp_err_t safety_manager_set_max_heater_power_pct(uint8_t pct)
 uint8_t safety_manager_get_max_heater_power_pct(void)
 {
     return s_max_heater_power_pct;
+}
+
+uint8_t safety_manager_get_last_requested_heater_pct(void)
+{
+    return s_last_requested_heater_pct;
 }
 
 void safety_manager_on_temperature_sample(float bean_temp_c, bool sensor_valid)
@@ -182,6 +196,15 @@ void safety_manager_report_recovery_sensor_failure(void)
 esp_err_t safety_manager_emergency_stop(void)
 {
     raise_critical_alarm(SAFETY_ALARM_EMERGENCY_STOP, "operator-triggered Emergency Stop");
+    /* Per operator requirement: Emergency Stop must cut EVERYTHING
+     * immediately, including the fan - unlike the other critical alarms
+     * above (sensor failure, duration watchdog, indirect fan failure),
+     * which deliberately leave the fan running for continued safe airflow.
+     * This is the one true "kill it all now" button, so it bypasses
+     * safety_manager_request_fan_pct() entirely (which would otherwise
+     * reject a fan-off request while BT is still >= SAFETY_FAN_STOP_MIN_TEMP_C)
+     * by calling the HAL directly. */
+    fan_pwm_force_off();
     return ESP_OK;
 }
 

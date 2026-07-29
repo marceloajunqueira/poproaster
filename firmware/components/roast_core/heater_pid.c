@@ -19,6 +19,18 @@
 #define PID_OUTPUT_MIN 0.0f
 #define PID_OUTPUT_MAX 100.0f
 
+/* SAFETY BACKSTOP: this drum's BT sensor sits in the circulating air (not
+ * on the element itself), so there's a real, significant thermal lag
+ * between the heater actually running and the sensor showing it -
+ * operator-reported. During that lag, error stays strongly positive for a
+ * while, which can wind the integral term up far beyond what's needed.
+ * Independent of the anti-windup fix below, if the measured temperature is
+ * already this many degrees ABOVE target, force the heater fully off
+ * immediately, no PID math involved - a hard, unconditional ceiling.
+ * Directly addresses an operator-reported burn risk: "coloquei 100 graus,
+ * mesmo passando a temperatura o heater continuou no maximo". */
+#define PID_HARD_OVERSHOOT_MARGIN_C 3.0f
+
 static float s_integral;
 static float s_prev_measured_c;
 static bool s_has_prev;
@@ -38,6 +50,16 @@ uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s
 
     float error = target_temp_c - measured_temp_c;
 
+    if (error <= -PID_HARD_OVERSHOOT_MARGIN_C) {
+        /* Already meaningfully over target - cut immediately and reset the
+         * integral so there's no leftover windup once temperature comes
+         * back down toward target. */
+        s_integral = 0.0f;
+        s_prev_measured_c = measured_temp_c;
+        s_has_prev = true;
+        return 0;
+    }
+
     float d_measured = s_has_prev ? (measured_temp_c - s_prev_measured_c) / dt_s : 0.0f;
     s_prev_measured_c = measured_temp_c;
     s_has_prev = true;
@@ -45,23 +67,32 @@ uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s
     float p_term = PID_KP * error;
     float d_term = -PID_KD * d_measured;
 
-    /* Anti-windup (clamp-and-freeze): only accumulate the integral term
-     * while the output isn't already saturated in a direction that would
-     * make the saturation worse. */
-    float unclamped_output = p_term + PID_KI * s_integral + d_term;
-    bool saturated_high = unclamped_output > PID_OUTPUT_MAX;
-    bool saturated_low = unclamped_output < PID_OUTPUT_MIN;
-    if (!((saturated_high && error > 0.0f) || (saturated_low && error < 0.0f))) {
-        s_integral += error * dt_s;
-    }
+    /* Back-calculation anti-windup: rather than merely FREEZING the
+     * integral while saturated (the previous approach), continuously
+     * resynchronize it to whatever value would be EXACTLY consistent with
+     * the actually-applied (clamped) output. This means the integral can
+     * never silently balloon far beyond what's needed to just barely
+     * saturate - critical given this system's thermal lag can otherwise
+     * let error stay positive for a long time, winding the integral up so
+     * much that once the temperature finally catches up/overshoots, the
+     * old freeze-only approach could take many minutes of negative error
+     * to unwind it - during which the heater stayed pinned near 100% well
+     * past the target (the exact burn-risk behavior reported). With this
+     * fix, the moment the raw (unclamped) computation would no longer
+     * saturate, the integral already reflects reality with no artificial
+     * backlog, so output starts dropping immediately. */
+    float integral_candidate = s_integral + error * dt_s;
+    float unclamped_output = p_term + PID_KI * integral_candidate + d_term;
 
-    float output = p_term + PID_KI * s_integral + d_term;
+    float output = unclamped_output;
     if (output > PID_OUTPUT_MAX) {
         output = PID_OUTPUT_MAX;
     }
     if (output < PID_OUTPUT_MIN) {
         output = PID_OUTPUT_MIN;
     }
+
+    s_integral = (PID_KI > 0.0f) ? ((output - p_term - d_term) / PID_KI) : integral_candidate;
 
     return (uint8_t)(output + 0.5f);
 }

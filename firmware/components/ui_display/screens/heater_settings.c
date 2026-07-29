@@ -87,8 +87,9 @@ void heater_settings_show_in(lv_obj_t *parent)
     lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(note, content_w - 24);
     lv_label_set_text(note,
-                       "Caps the heater's PWM duty cycle regardless of what the automatic PID/profile "
-                       "control asks for - useful if your resistive element is too strong at full power.");
+                       "Scales heater duty proportionally, not just a ceiling: e.g. at a 50% cap, a "
+                       "requested 40% duty really only reaches 20% (100% reaches 50%). Useful if your "
+                       "resistive element is too strong at full power.");
     lv_obj_align(note, LV_ALIGN_TOP_LEFT, 12, 44);
 
     int32_t current_pct = (int32_t)safety_manager_get_max_heater_power_pct();
@@ -96,14 +97,14 @@ void heater_settings_show_in(lv_obj_t *parent)
     s_value_label = lv_label_create(parent);
     lv_obj_add_style(s_value_label, &s_style_label, LV_PART_MAIN);
     update_value_label(current_pct);
-    lv_obj_align(s_value_label, LV_ALIGN_TOP_LEFT, 12, 92);
+    lv_obj_align(s_value_label, LV_ALIGN_TOP_LEFT, 12, 110);
 
     lv_coord_t slider_margin = 24;
     lv_coord_t slider_w = content_w - (slider_margin * 2);
 
     s_slider = lv_slider_create(parent);
     lv_obj_set_size(s_slider, slider_w, 20);
-    lv_obj_align(s_slider, LV_ALIGN_TOP_LEFT, slider_margin, 118);
+    lv_obj_align(s_slider, LV_ALIGN_TOP_LEFT, slider_margin, 136);
     lv_slider_set_range(s_slider, 0, 100);
     lv_slider_set_value(s_slider, current_pct, LV_ANIM_OFF);
     lv_obj_add_event_cb(s_slider, slider_event_cb, LV_EVENT_RELEASED, NULL);
