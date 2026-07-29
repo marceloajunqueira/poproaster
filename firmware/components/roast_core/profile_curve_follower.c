@@ -13,8 +13,10 @@
 #include "roast_core/roast_profile.h"
 #include "roast_core/roast_events.h"
 #include "roast_core/heater_pid.h"
+#include "roast_core/pid_debug_log.h"
 #include "storage/profile_store.h"
 #include "hal/fan_pwm.h"
+#include "hal/ssr_heater.h"
 #include "safety/safety_manager.h"
 #include "roast_core/profile_curve_follower.h"
 
@@ -53,6 +55,32 @@ static int s_last_written_fan = -1;
 static int s_last_written_heater = -1;
 static bool s_fallback_fan_written = false;
 
+/* BUG FIX (operator-reported): the fan used to stay on FOREVER once a
+ * Profile-mode roast auto-completed after Cooling - nothing ever commanded
+ * it back to 0, since session_sm_complete() itself doesn't touch actuators
+ * and the "no active session" branch below only drives the Manual-mode
+ * heater PID, never the fan. `s_fan_off_pending` tracks a best-effort,
+ * retried-until-safe fan shutoff: set the moment the session completes,
+ * retried every tick afterward (the very first attempt commonly succeeds
+ * immediately, since COOLING_AUTO_COMPLETE_TEMP_C=50C is already well under
+ * the fan's own SAFETY_FAN_STOP_MIN_TEMP_C=100C anti-scorch floor - but a
+ * completion triggered by the profile's own cooling DURATION elapsing, or
+ * the cooling failsafe, could still have BT >=100C, so the very first
+ * attempt can legitimately be rejected and needs a retry once it's safe). 
+ * Bounded by FAN_OFF_RETRY_WINDOW_MS and abandoned early if the operator
+ * manually changes the fan themselves (checked against s_last_written_fan,
+ * same override-detection idea already used elsewhere in this file) - this
+ * must never fight an operator's own explicit fan command. */
+#define FAN_OFF_RETRY_WINDOW_MS (5 * 60 * 1000)
+static bool s_fan_off_pending = false;
+static int64_t s_fan_off_pending_since_ms = 0;
+
+/* PID tuning: open-loop step-response test state (see
+ * profile_curve_follower_set_step_test_heater_pct() in the header). -1
+ * means inactive. */
+static int s_step_test_heater_pct = -1;
+static int64_t s_step_test_start_ms = 0;
+
 static int64_t now_ms(void)
 {
     return esp_timer_get_time() / 1000;
@@ -81,12 +109,27 @@ static void drive_heating_segment(uint32_t elapsed_s, uint8_t segment_idx)
 
     float target_temp = roast_profile_get_target_temp_c(&s_profile, elapsed_s);
     uint8_t target_fan = roast_profile_get_target_fan_pct(&s_profile, elapsed_s);
+    /* Tell the thermal-protector observer what was ACTUALLY driving the
+     * element over the interval that just elapsed, before asking the PID to
+     * evaluate it - a temperature collapse only implicates the protector if
+     * real power was being delivered. */
+    heater_pid_note_applied_pct(ssr_heater_get_duty_pct());
     /* Keep the PID's internal state (integral/derivative) ticking every
      * follower period regardless of override, so it doesn't need to "catch
      * up" with a derivative kick once an override expires; only whether we
      * ACT on its output is gated below. */
     uint8_t target_heater = heater_pid_update(target_temp, snap.sensor_valid ? snap.bean_temp_c : target_temp,
                                                FOLLOWER_PERIOD_US / 1000000.0f);
+
+    /* Operator-requested PID tuning log (roast_core/pid_debug_log.h) - one
+     * row per follower tick, regardless of override state, so the whole
+     * picture (including gaps where an override was in effect) is
+     * visible. applied_heater_pct/real_fan_pct read back whatever is
+     * CURRENTLY actually running (from before this tick's own commands
+     * take effect) - a harmless one-tick lag for tuning purposes. */
+    pid_debug_log_record("PROFILE", session_sm_get_state()->phase, elapsed_s, target_temp,
+                          snap.sensor_valid ? snap.bean_temp_c : target_temp, snap.sensor_valid, target_heater,
+                          ssr_heater_get_duty_pct(), target_fan, fan_pwm_get_pct());
 
     if (s_override_active) {
         if (segment_idx != s_override_segment_idx) {
@@ -97,9 +140,25 @@ static void drive_heating_segment(uint32_t elapsed_s, uint8_t segment_idx)
         }
     }
 
-    if (s_last_written_fan >= 0 &&
-        (fan_pwm_get_target_pct() != (uint8_t)s_last_written_fan ||
-         safety_manager_get_last_requested_heater_pct() != (uint8_t)s_last_written_heater)) {
+    /* BUG FIX: each of fan/heater must only be override-checked once THIS
+     * follower has actually gotten a successful write in for it - checking
+     * both under a single "s_last_written_fan >= 0" guard (as before)
+     * silently assumed both always become valid together, which broke once
+     * heater writes started being independently success-gated (see below):
+     * during the fan's soft-start ramp, the fan write succeeds immediately
+     * while the heater write is CORRECTLY rejected (fan not physically at
+     * the floor yet) for a few ticks - leaving s_last_written_heater at its
+     * -1 sentinel while s_last_written_fan already holds a real value.
+     * Casting that -1 sentinel to uint8_t (255) against a real 0-100
+     * request always "mismatched", permanently freezing the heater via a
+     * false override the moment the fan's first write succeeded -
+     * operator-reported ("fan subiu aos poucos, mas o Heater nunca foi
+     * acionado"). Fix: gate each field's mismatch check independently on
+     * ITS OWN sentinel. */
+    bool fan_override = (s_last_written_fan >= 0) && (fan_pwm_get_target_pct() != (uint8_t)s_last_written_fan);
+    bool heater_override = (s_last_written_heater >= 0) &&
+                            (safety_manager_get_last_requested_heater_pct() != (uint8_t)s_last_written_heater);
+    if (fan_override || heater_override) {
         ESP_LOGI(TAG, "Manual override detected (fan %d->%d, heater %d->%d) - pausing curve follower until next segment",
                  s_last_written_fan, fan_pwm_get_target_pct(), s_last_written_heater,
                  safety_manager_get_last_requested_heater_pct());
@@ -182,6 +241,10 @@ static void drive_manual_heater(void)
     roast_telemetry_snapshot_t snap;
     roast_telemetry_service_get_snapshot(&snap);
 
+    /* See drive_heating_segment(): the observer needs the duty that was
+     * really applied over the interval just elapsed. */
+    heater_pid_note_applied_pct(ssr_heater_get_duty_pct());
+
     uint8_t heater_target = heater_pid_update(s_manual_target_temp_c,
                                                snap.sensor_valid ? snap.bean_temp_c : s_manual_target_temp_c,
                                                FOLLOWER_PERIOD_US / 1000000.0f);
@@ -190,11 +253,48 @@ static void drive_manual_heater(void)
         command_dispatcher_set_fan_pct(SAFETY_FAN_MIN_PCT_DURING_HEAT, SAFETY_CMD_SOURCE_DISPLAY);
     }
     command_dispatcher_set_heater_pct(heater_target, SAFETY_CMD_SOURCE_DISPLAY);
+
+    /* Operator-requested PID tuning log - only while a real target is set
+     * (this function runs on EVERY follower tick regardless of session
+     * state, including IDLE, so gating on a nonzero target avoids logging
+     * 24/7 while the roaster just sits idle). */
+    if (s_manual_target_temp_c > 0.0f) {
+        pid_debug_log_record("MANUAL", session_sm_get_state()->phase,
+                              (uint32_t)(session_sm_get_state()->elapsed_ms / 1000), s_manual_target_temp_c,
+                              snap.sensor_valid ? snap.bean_temp_c : s_manual_target_temp_c, snap.sensor_valid,
+                              heater_target, ssr_heater_get_duty_pct(), fan_pwm_get_target_pct(), fan_pwm_get_pct());
+    }
+}
+
+/** PID tuning: drives the heater at a FIXED, PID-bypassed duty for as long
+ * as a step-response test is active (see header), logging every tick to
+ * the same PID debug log under mode="STEPTEST" so the resulting bean-temp
+ * rise/fall curve can be analyzed offline - the fan is left entirely to
+ * the operator's own control since this hardware heats via forced air
+ * through the coil (fan can never be off during a real heat test). */
+static void drive_step_test(void)
+{
+    roast_telemetry_snapshot_t snap;
+    roast_telemetry_service_get_snapshot(&snap);
+
+    command_dispatcher_set_heater_pct((uint8_t)s_step_test_heater_pct, SAFETY_CMD_SOURCE_DISPLAY);
+
+    uint32_t elapsed_s = (uint32_t)((now_ms() - s_step_test_start_ms) / 1000);
+    pid_debug_log_record("STEPTEST", ROAST_PHASE_IDLE, elapsed_s, 0.0f,
+                          snap.sensor_valid ? snap.bean_temp_c : 0.0f, snap.sensor_valid,
+                          (uint8_t)s_step_test_heater_pct, ssr_heater_get_duty_pct(), fan_pwm_get_target_pct(),
+                          fan_pwm_get_pct());
 }
 
 static void follower_timer_cb(void *arg)
 {
     (void)arg;
+
+    if (s_step_test_heater_pct >= 0) {
+        drive_step_test();
+        return; /* Supersedes Manual/Profile PID control entirely while active. */
+    }
+
     const roast_session_t *session = session_sm_get_state();
     roast_phase_t phase = session->phase;
 
@@ -210,6 +310,40 @@ static void follower_timer_cb(void *arg)
          * operator explicitly sets one via the Manual screen). Never treat
          * this as Profile mode - a stale s_profile_loaded from a previous
          * session must not linger here. */
+        if (phase_is_session_active(s_last_phase)) {
+            /* BUG FIX: a session just ended THIS tick (Cancel/Abort or
+             * Emergency Stop - both go straight to ABORTED per the current
+             * design, see drive_cooling()'s comment above). Manual mode's
+             * Target Temp is intentionally session-independent (the fix
+             * above this one), but that means it was NEVER being cleared
+             * here - so a Manual/Artisan session cancelled while a nonzero
+             * Target Temp was still applied would have this exact branch
+             * call drive_manual_heater() again on THIS SAME tick with the
+             * stale target still in place, and since session_sm_abort()
+             * only force-offs the heater ONCE (not an alarm - no ack
+             * needed, unlike Emergency Stop), the PID would happily
+             * re-command the heater back on toward that stale target
+             * within ~1s of pressing Cancel - operator-facing symptom:
+             * "Cancel doesn't actually stop the heat". Clear it so
+             * ending a session always requires a fresh explicit Target
+             * Temp from the operator afterward, same guarantee already
+             * given when a NEW session starts below. */
+            ESP_LOGI(TAG, "Session ended - clearing Manual Target Temp so heating can't silently resume");
+            s_manual_target_temp_c = 0.0f;
+        }
+        if (s_fan_off_pending) {
+            /* Keep retrying the deferred post-cooling fan shutoff every
+             * tick while inactive, until it succeeds, the operator takes
+             * the fan back over themselves, or the retry window expires. */
+            bool operator_took_over = (s_last_written_fan >= 0) && (fan_pwm_get_target_pct() != (uint8_t)s_last_written_fan);
+            bool window_expired = (now_ms() - s_fan_off_pending_since_ms) >= FAN_OFF_RETRY_WINDOW_MS;
+            if (operator_took_over || window_expired) {
+                s_fan_off_pending = false;
+            } else if (command_dispatcher_set_fan_pct(0, SAFETY_CMD_SOURCE_PROFILE_CURVE) == ESP_OK) {
+                ESP_LOGI(TAG, "Fan turned off automatically now that BT is below the safe-stop threshold");
+                s_fan_off_pending = false;
+            }
+        }
         s_profile_loaded = false;
         s_last_phase = phase;
         drive_manual_heater();
@@ -224,6 +358,7 @@ static void follower_timer_cb(void *arg)
         reset_override_tracking();
         heater_pid_reset();
         s_auto_finished = false;
+        s_fan_off_pending = false;
         /* Never silently inherit a stale target from a previous Manual
          * session - the operator must set a fresh one via the Target Temp
          * slider each time. */
@@ -336,6 +471,24 @@ static void follower_timer_cb(void *arg)
                      profile_cooling_done ? "profile timeline elapsed" : "BT below safe threshold");
         }
         session_sm_complete();
+
+        /* BUG FIX (operator-reported): the fan used to keep running
+         * forever after a Profile roast finished Cooling - nothing ever
+         * commanded it back off. Attempt it right away (this almost always
+         * succeeds immediately, since COOLING_AUTO_COMPLETE_TEMP_C=50C is
+         * already well under the fan's SAFETY_FAN_STOP_MIN_TEMP_C=100C
+         * anti-scorch floor); if BT still isn't safe yet (e.g. this
+         * completion was triggered by the profile's own cooling duration
+         * elapsing, or the failsafe, rather than by temperature), defer
+         * and keep retrying every tick from the "no active session" branch
+         * above until it's safe. */
+        s_fan_off_pending_since_ms = now_ms();
+        if (command_dispatcher_set_fan_pct(0, SAFETY_CMD_SOURCE_PROFILE_CURVE) == ESP_OK) {
+            s_fan_off_pending = false;
+        } else {
+            s_fan_off_pending = true;
+            ESP_LOGI(TAG, "Fan-off deferred (BT still above the safe-stop threshold) - will keep retrying");
+        }
     }
 }
 
@@ -370,10 +523,50 @@ esp_err_t profile_curve_follower_init(void)
 
 void profile_curve_follower_set_manual_target_temp_c(float target_c)
 {
+    /* SECURITY/SAFETY: this is reachable directly from the unauthenticated
+     * web API (`POST /api/control action=set_target_temp&value=N`,
+     * dashboard_routes.c) as a raw atoi()'d integer with NO validation at
+     * that layer - unlike the on-device Manual screen, which already
+     * bounds its slider to 0..260. Without a clamp here, a bogus/malicious
+     * request (or a client-side bug) could set an absurd target (e.g.
+     * hugely negative or in the tens of thousands); a very negative value
+     * is harmless (the PID's hard-overshoot cutoff forces the heater off
+     * immediately), but a very large positive value would have the PID
+     * legitimately try to drive the heater at 100% indefinitely with
+     * nothing but the last-resort 260C absolute safety cutoff
+     * (safety_manager.c) ever stopping it - far more aggressive than any
+     * real profile/operator intent. Clamp to the same 0..260C range the
+     * display's own Target Temp slider already enforces. */
+    if (target_c < 0.0f) {
+        target_c = 0.0f;
+    } else if (target_c > SAFETY_TEMP_ABSOLUTE_CUTOFF_C) {
+        target_c = SAFETY_TEMP_ABSOLUTE_CUTOFF_C;
+    }
     s_manual_target_temp_c = target_c;
 }
 
 float profile_curve_follower_get_manual_target_temp_c(void)
 {
     return s_manual_target_temp_c;
+}
+
+void profile_curve_follower_set_step_test_heater_pct(int pct)
+{
+    if (pct < 0) {
+        s_step_test_heater_pct = -1;
+        command_dispatcher_set_heater_pct(0, SAFETY_CMD_SOURCE_DISPLAY);
+        return;
+    }
+    if (pct > 100) {
+        pct = 100;
+    }
+    if (s_step_test_heater_pct < 0) {
+        s_step_test_start_ms = now_ms(); /* Only reset the elapsed-time reference on a fresh start, not on a mid-test duty change. */
+    }
+    s_step_test_heater_pct = pct;
+}
+
+int profile_curve_follower_get_step_test_heater_pct(void)
+{
+    return s_step_test_heater_pct;
 }

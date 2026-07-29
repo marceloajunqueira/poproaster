@@ -20,6 +20,8 @@ static const char *TAG = "peripheral_test";
 #define HEATER_TEST_PCT     20  /* Deliberately low - this is a functional smoke test (does the SSR/element respond at all), not a real roast. */
 #define HEATER_TEST_MS      8000
 #define CONFIRM_TIMEOUT_MS  4000
+#define FAN_FLOOR_WAIT_POLL_MS   200   /* How often to re-check whether the fan has actually reached the floor. */
+#define FAN_FLOOR_WAIT_MAX_TICKS 25    /* 25*200ms = 5s - comfortably over the ~2s soft-start ramp; abort if exceeded (shouldn't happen). */
 
 static lv_obj_t *s_sensor_label;
 static lv_obj_t *s_fan_label;
@@ -30,6 +32,8 @@ static lv_timer_t *s_refresh_timer;
 static lv_timer_t *s_fan_test_timer;
 static lv_timer_t *s_heater_test_timer;
 static lv_timer_t *s_heater_confirm_timer;
+static lv_timer_t *s_heater_fan_wait_timer;
+static int s_heater_fan_wait_ticks;
 static bool s_fan_test_running = false;
 static bool s_heater_test_running = false;
 static bool s_heater_confirm_armed = false;
@@ -74,6 +78,10 @@ static void stop_heater_test(void)
     if (s_heater_confirm_timer != NULL) {
         lv_timer_del(s_heater_confirm_timer);
         s_heater_confirm_timer = NULL;
+    }
+    if (s_heater_fan_wait_timer != NULL) {
+        lv_timer_del(s_heater_fan_wait_timer);
+        s_heater_fan_wait_timer = NULL;
     }
     s_heater_confirm_armed = false;
     if (s_heater_test_running) {
@@ -138,6 +146,59 @@ static void fan_test_btn_event_cb(lv_event_t *e)
 /* Two-tap confirm (same pattern as session_review.c's "Delete All") since
  * this is the one test that commands the heater - never fire on a single
  * accidental tap. */
+
+/* Actually applies the heater test request, once the fan is confirmed to
+ * really be at/above the floor (called either immediately, if the fan was
+ * already spinning, or after heater_fan_wait_cb() finishes polling). */
+static void start_heater_test_now(void)
+{
+    esp_err_t err = command_dispatcher_set_heater_pct(HEATER_TEST_PCT, SAFETY_CMD_SOURCE_DISPLAY);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Heater test rejected: %s", esp_err_to_name(err));
+        command_dispatcher_set_fan_pct(0, SAFETY_CMD_SOURCE_DISPLAY);
+        lv_label_set_text(s_heater_btn_label, "Test Heater");
+        return;
+    }
+
+    s_heater_test_running = true;
+    lv_label_set_text(s_heater_btn_label, "Running... (tap to stop)");
+    if (s_heater_test_timer != NULL) {
+        lv_timer_del(s_heater_test_timer);
+    }
+    s_heater_test_timer = lv_timer_create(heater_test_timeout_cb, HEATER_TEST_MS, NULL);
+    lv_timer_set_repeat_count(s_heater_test_timer, 1);
+}
+
+/* BUG FIX (operator report: "Test Heater" did nothing after confirming):
+ * commanding the fan to the floor and then IMMEDIATELY commanding the
+ * heater used to always fail, because fan_pwm.c's soft-start ramp means
+ * the fan takes ~2s to physically reach the floor - the heater request's
+ * "fan must already be at/above the floor" check was being evaluated
+ * against the fan's live (still-ramping-from-0) value, not its eventual
+ * target, so it was rejected every single time. Unlike
+ * profile_curve_follower.c (which just retries every 1s tick until the fan
+ * catches up), this one-shot test never retried at all. Fix: poll
+ * fan_pwm_get_pct() every 200ms until it actually reaches the floor (or a
+ * 5s safety timeout elapses), THEN apply the heater request. */
+static void heater_fan_wait_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (fan_pwm_get_pct() >= SAFETY_FAN_MIN_PCT_DURING_HEAT) {
+        lv_timer_del(s_heater_fan_wait_timer);
+        s_heater_fan_wait_timer = NULL;
+        start_heater_test_now();
+        return;
+    }
+    s_heater_fan_wait_ticks++;
+    if (s_heater_fan_wait_ticks >= FAN_FLOOR_WAIT_MAX_TICKS) {
+        lv_timer_del(s_heater_fan_wait_timer);
+        s_heater_fan_wait_timer = NULL;
+        ESP_LOGW(TAG, "Heater test: fan never reached the floor within the timeout - aborting");
+        command_dispatcher_set_fan_pct(0, SAFETY_CMD_SOURCE_DISPLAY);
+        lv_label_set_text(s_heater_btn_label, "Test Heater");
+    }
+}
+
 static void heater_test_btn_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
@@ -172,21 +233,21 @@ static void heater_test_btn_event_cb(lv_event_t *e)
         lv_label_set_text(s_heater_btn_label, "Test Heater");
         return;
     }
-    err = command_dispatcher_set_heater_pct(HEATER_TEST_PCT, SAFETY_CMD_SOURCE_DISPLAY);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Heater test rejected: %s", esp_err_to_name(err));
-        command_dispatcher_set_fan_pct(0, SAFETY_CMD_SOURCE_DISPLAY);
-        lv_label_set_text(s_heater_btn_label, "Test Heater");
+
+    if (fan_pwm_get_pct() >= SAFETY_FAN_MIN_PCT_DURING_HEAT) {
+        /* Fan was already running at/above the floor - no need to wait. */
+        start_heater_test_now();
         return;
     }
 
-    s_heater_test_running = true;
-    lv_label_set_text(s_heater_btn_label, "Running... (tap to stop)");
-    if (s_heater_test_timer != NULL) {
-        lv_timer_del(s_heater_test_timer);
+    /* Fan just started ramping up from a stop - wait for it to actually
+     * get there before requesting the heater. */
+    lv_label_set_text(s_heater_btn_label, "Spinning up fan...");
+    s_heater_fan_wait_ticks = 0;
+    if (s_heater_fan_wait_timer != NULL) {
+        lv_timer_del(s_heater_fan_wait_timer);
     }
-    s_heater_test_timer = lv_timer_create(heater_test_timeout_cb, HEATER_TEST_MS, NULL);
-    lv_timer_set_repeat_count(s_heater_test_timer, 1);
+    s_heater_fan_wait_timer = lv_timer_create(heater_fan_wait_cb, FAN_FLOOR_WAIT_POLL_MS, NULL);
 }
 
 static void back_btn_event_cb(lv_event_t *e)

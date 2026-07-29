@@ -10,10 +10,12 @@ idf_component_register(
         "profile_curve_follower.c"
         "heater_pid.c"
         "roast_events.c"
+        "pid_debug_log.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
         esp_timer
+        nvs_flash
         safety
         roaster_hal
         storage

@@ -31,6 +31,8 @@
 #include "roast_core/command_dispatcher.h"
 #include "roast_core/roast_telemetry_service.h"
 #include "roast_core/profile_curve_follower.h"
+#include "roast_core/pid_debug_log.h"
+#include "roast_core/heater_pid.h"
 #include "roast_core/session_recovery.h"
 #include "web_api/server.h"
 #include "artisan_adapter/artisan_bridge.h"
@@ -61,6 +63,10 @@ void app_main(void)
 
     ESP_ERROR_CHECK(nvs_store_init());
     ESP_ERROR_CHECK(session_store_init());
+    ESP_ERROR_CHECK(pid_debug_log_init());
+    /* Restores any live-tuned PID gains saved from the web Diagnostics page,
+     * before the follower starts driving the loop with them. */
+    ESP_ERROR_CHECK(heater_pid_load_tuning());
     ESP_ERROR_CHECK(profile_store_init());
     ESP_ERROR_CHECK(i18n_init());
 
@@ -92,9 +98,9 @@ void app_main(void)
      * content renderer before building the shell. Labels include a small
      * icon line (LV_SYMBOL_*) above the text, per the user's request. */
     nav_shell_register_tab(NAV_SHELL_TAB_ROAST, LV_SYMBOL_PLAY "\nRoast", roast_dashboard_show_in, roast_dashboard_hide);
-    nav_shell_register_tab(NAV_SHELL_TAB_PRESETS, LV_SYMBOL_LIST "\nPresets", profile_list_show_in, NULL);
+    nav_shell_register_tab(NAV_SHELL_TAB_PRESETS, LV_SYMBOL_LIST "\nPresets", profile_list_show_in, profile_list_hide);
     nav_shell_register_tab(NAV_SHELL_TAB_MANUAL, LV_SYMBOL_TINT "\nManual", manual_control_show_in, manual_control_hide);
-    nav_shell_register_tab(NAV_SHELL_TAB_HISTORY, LV_SYMBOL_DIRECTORY "\nHistory", session_review_show_in, NULL);
+    nav_shell_register_tab(NAV_SHELL_TAB_HISTORY, LV_SYMBOL_DIRECTORY "\nHistory", session_review_show_in, session_review_hide);
     nav_shell_register_tab(NAV_SHELL_TAB_CONFIG, LV_SYMBOL_SETTINGS "\nConfig", settings_hub_show_in, settings_hub_hide);
     ESP_ERROR_CHECK(nav_shell_init(NAV_SHELL_TAB_ROAST));
 

@@ -152,6 +152,32 @@ static void revert_title_cb(lv_timer_t *timer)
     s_title_revert_timer = NULL;
 }
 
+/* BUG FIX: this screen was previously registered in main.c with a NULL
+ * hide_fn - nothing ever cancelled s_delete_disarm_timer/s_title_revert_timer
+ * if the operator switched to another sidebar tab while either was armed
+ * (e.g. tapped a row's Delete once, then immediately tapped "History").
+ * nav_shell.c's tab switch calls lv_obj_clean() on the content pane
+ * (destroying s_armed_delete_lbl/s_title_lbl) but has no way to know about
+ * timers this screen created outside that tree - the pending timer would
+ * fire seconds later and dereference those now-dangling lv_obj_t pointers,
+ * crashing. Same class of bug as the T022 "timer outlives its screen"
+ * lesson already applied to every screen's own periodic refresh timer -
+ * this two-tap-confirm timer (added later) had been missed. */
+void profile_list_hide(void)
+{
+    if (s_delete_disarm_timer != NULL) {
+        lv_timer_del(s_delete_disarm_timer);
+        s_delete_disarm_timer = NULL;
+    }
+    if (s_title_revert_timer != NULL) {
+        lv_timer_del(s_title_revert_timer);
+        s_title_revert_timer = NULL;
+    }
+    s_armed_delete_id = -1;
+    s_armed_delete_lbl = NULL;
+    s_title_lbl = NULL;
+}
+
 /*
  * Lets a preset be removed directly from the list, WITHOUT ever opening the
  * editor screen - important because a corrupted/old-format stored profile

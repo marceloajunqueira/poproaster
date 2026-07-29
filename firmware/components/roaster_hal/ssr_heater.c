@@ -11,10 +11,34 @@
 
 static const char *TAG = "ssr_heater";
 
-/* 2-second window is a common, SSR-friendly time-proportioning period for
- * resistive heating loads (avoids excessive mechanical/thermal cycling of
- * the relay while still giving reasonably fine-grained average power control). */
-#define SSR_WINDOW_MS 2000
+/* Time-proportioning period for the resistive heating element.
+ *
+ * ORIGINALLY 2000ms, reduced to 500ms after an operator report: "a
+ * resistencia fica vermelha e apaga, vermelha e apaga, parece que ela fica
+ * em um ciclo lento de liga e desliga". That was exactly right - with a 2s
+ * window, a 60% duty means the coil sits fully ON for 1.2s then fully OFF
+ * for 0.8s, over and over. On this hardware (bare coil in a tube with the
+ * fan blowing through it, hot-air-gun style) the coil has very little
+ * thermal mass, so it visibly glows and goes dark each cycle AND the air
+ * temperature leaving the tube swings with it - injecting a periodic
+ * temperature ripple into the very signal the PID is trying to regulate.
+ * At 500ms the coil never fully cools between pulses, so the delivered heat
+ * is much closer to a true continuous average.
+ *
+ * NOTE: nothing about the switching rate was changed by the PID retune -
+ * this window has been 2000ms since the driver was first written; the
+ * slow visible cycling was always there, it just became noticeable once
+ * the PID stopped pinning the duty at 100% all the time. */
+#define SSR_WINDOW_MS 500
+
+/* Tick resolution of the time-proportioning window. Must divide the window
+ * finely enough to keep duty granularity usable: at a 10ms tick a 500ms
+ * window gives 50 discrete steps (2% duty granularity). The previous 50ms
+ * tick would have left only 10 steps (10% granularity) at this window
+ * size, so it was reduced alongside the window. 10ms is also comfortably
+ * longer than one mains half-cycle (8.3ms @60Hz), so a zero-cross SSR can
+ * still track it. */
+#define SSR_TICK_MS 10
 
 static uint8_t s_duty_pct = 0;
 static esp_timer_handle_t s_window_timer;
@@ -29,14 +53,14 @@ static void ssr_set_gpio(bool on)
 static void ssr_window_cb(void *arg)
 {
     /* Simple software time-proportioning: ON for duty_pct% of the window,
-     * OFF for the rest. Re-armed every window via esp_timer periodic mode. */
-    static uint32_t elapsed_in_window_ms = 0;
-    elapsed_in_window_ms += 50;
-    if (elapsed_in_window_ms >= SSR_WINDOW_MS) {
-        elapsed_in_window_ms = 0;
-    }
+     * OFF for the rest. Position within the window is derived from the
+     * monotonic timer rather than an incrementing counter, so it stays
+     * correct regardless of tick period and can't drift if a tick is
+     * delayed. */
+    (void)arg;
+    uint32_t pos_in_window_ms = (uint32_t)((esp_timer_get_time() / 1000) % SSR_WINDOW_MS);
     uint32_t on_time_ms = (SSR_WINDOW_MS * s_duty_pct) / 100;
-    ssr_set_gpio(elapsed_in_window_ms < on_time_ms);
+    ssr_set_gpio(pos_in_window_ms < on_time_ms);
 }
 
 esp_err_t ssr_heater_init(void)
@@ -65,14 +89,15 @@ esp_err_t ssr_heater_init(void)
         ESP_LOGE(TAG, "esp_timer_create failed: %s", esp_err_to_name(err));
         return err;
     }
-    /* 50ms tick resolution for the time-proportioning window. */
-    err = esp_timer_start_periodic(s_window_timer, 50 * 1000);
+    /* Tick resolution for the time-proportioning window. */
+    err = esp_timer_start_periodic(s_window_timer, SSR_TICK_MS * 1000);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_timer_start_periodic failed: %s", esp_err_to_name(err));
         return err;
     }
 
-    ESP_LOGI(TAG, "SSR heater init OK (GPIO=%d, window=%dms)", BOARD_PERIPH_SSR_HEATER_GPIO, SSR_WINDOW_MS);
+    ESP_LOGI(TAG, "SSR heater init OK (GPIO=%d, window=%dms, tick=%dms)", BOARD_PERIPH_SSR_HEATER_GPIO,
+             SSR_WINDOW_MS, SSR_TICK_MS);
     return ESP_OK;
 }
 

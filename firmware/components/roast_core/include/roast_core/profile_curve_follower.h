@@ -58,6 +58,27 @@ void profile_curve_follower_set_manual_target_temp_c(float target_c);
 /** Returns whatever profile_curve_follower_set_manual_target_temp_c() last set - lets the Manual screen sync its Target Temp slider (e.g. after navigating away and back) without keeping its own separate copy of this state. */
 float profile_curve_follower_get_manual_target_temp_c(void);
 
+/**
+ * PID tuning aid (operator-requested): open-loop step-response test. Bypasses
+ * the PID entirely and commands the heater to a FIXED duty (0-100), logging
+ * every follower tick to the same PID debug log (roast_core/pid_debug_log.h,
+ * mode="STEPTEST") so the resulting bean-temp curve can be downloaded and
+ * used to characterize the plant's real thermal lag/time constant - this
+ * hardware heats via forced air through a resistive coil (fan always on,
+ * needed for airflow into the roasting chamber itself), so the fan is left
+ * entirely to the operator's own Fan control; only the heater is overridden
+ * here. Takes effect on the very next follower tick, superseding Manual
+ * mode's own target-temperature PID for as long as it's active. Pass -1 to
+ * stop the test and return control to the normal Manual/Profile PID path
+ * (also forces the heater fully off immediately). Safety Manager's usual
+ * fan-floor/temperature-cutoff rules still apply underneath this - it is
+ * NOT a bypass of safety_manager.c, only of the PID math.
+ */
+void profile_curve_follower_set_step_test_heater_pct(int pct);
+
+/** Returns the currently active step-test duty (0-100), or -1 if the step test is not running - lets the web UI reflect actual state. */
+int profile_curve_follower_get_step_test_heater_pct(void);
+
 #ifdef __cplusplus
 }
 #endif

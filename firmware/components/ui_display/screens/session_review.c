@@ -514,6 +514,29 @@ static void disarm_delete_all_cb(lv_timer_t *timer)
     }
 }
 
+/* BUG FIX: this screen was previously registered in main.c with a NULL
+ * hide_fn - `show_list()` already resets/cancels s_disarm_timer on its OWN
+ * rebuilds (e.g. returning from the detail view), but nothing cancelled it
+ * if the operator armed "Delete All" and then switched to a DIFFERENT
+ * sidebar tab before the 4s window elapsed. nav_shell.c's tab switch calls
+ * lv_obj_clean() on the content pane (destroying s_delete_all_lbl/
+ * s_delete_all_btn) but has no way to know about this timer, which lives
+ * outside that widget tree - it would fire seconds later and dereference
+ * the now-dangling label pointer, crashing. Same class of bug as the T022
+ * "timer outlives its screen" lesson already applied to this screen's own
+ * chart-detail refresh logic elsewhere - this two-tap-confirm timer (added
+ * later, for T031's Delete All feature) had been missed. */
+void session_review_hide(void)
+{
+    if (s_disarm_timer != NULL) {
+        lv_timer_del(s_disarm_timer);
+        s_disarm_timer = NULL;
+    }
+    s_delete_all_armed = false;
+    s_delete_all_btn = NULL;
+    s_delete_all_lbl = NULL;
+}
+
 static void delete_all_btn_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {

@@ -167,7 +167,17 @@ void settings_hub_return_to_menu(lv_obj_t *parent)
 void settings_hub_hide(void)
 {
     /* Safe to call both unconditionally - each is a no-op if its own
-     * screen isn't the one currently active (nothing to tear down). */
+     * screen isn't the one currently active (nothing to tear down).
+     * BUG FIX: wifi_setup_hide() was missing here - Wi-Fi Setup is reached
+     * as a sub-screen of this Config tab (wifi_setup_btn_event_cb) and
+     * starts its own 1s status-refresh lv_timer. Switching to a DIFFERENT
+     * sidebar tab while Wi-Fi Setup was the active sub-screen (instead of
+     * using its own Back button first) left that timer running after
+     * nav_shell's lv_obj_clean() destroyed its labels - it would fire
+     * against dangling lv_obj_t pointers on the next 1s tick and crash.
+     * Same class of bug as the other three sub-screens below, which were
+     * already covered. */
+    wifi_setup_hide();
     peripheral_test_hide();
     sensor_calibration_hide();
     heater_settings_hide();

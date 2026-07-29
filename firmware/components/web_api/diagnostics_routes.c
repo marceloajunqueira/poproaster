@@ -3,6 +3,7 @@
  * @brief See header.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
 #include "esp_system.h"
@@ -15,6 +16,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "roast_core/pid_debug_log.h"
+#include "roast_core/heater_pid.h"
+#include "roast_core/profile_curve_follower.h"
 #include "web_api/diagnostics_routes.h"
 #include "web_api/dashboard_routes.h"
 
@@ -180,6 +184,99 @@ static void send_tasks_section(httpd_req_t *req)
     httpd_resp_send_chunk(req, "</table>", HTTPD_RESP_USE_STRLEN);
 }
 
+/* Operator-requested PID tuning aid: the log itself is written by
+ * roast_core/pid_debug_log.c (every follower tick that drives a real
+ * heater target, in both Profile and Manual mode) - this section just
+ * shows its current size and offers download/clear actions. */
+static void send_pid_log_section(httpd_req_t *req)
+{
+    httpd_resp_send_chunk(req, "<h2>PID Tuning Log</h2><table>", HTTPD_RESP_USE_STRLEN);
+
+    char val[32];
+    size_t bytes = pid_debug_log_get_size();
+    snprintf(val, sizeof(val), "%u KB", (unsigned)((bytes + 512) / 1024));
+    send_stat_row(req, "Current size", val);
+
+    httpd_resp_send_chunk(req, "</table>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req,
+                           "<p class='sub'>Records every heater PID cycle (target/measured temp, P/I/D terms, "
+                           "fan and heater duty) in Profile and Manual mode while a real target temperature is "
+                           "set - CSV, one row per follower tick (~1/s).</p>"
+                           "<div class='btnrow'>"
+                           "<a href='/api/pid_log/download'><button>Download CSV</button></a>"
+                           "<button id='pidLogClearBtn' class='danger'>Clear Log</button>"
+                           "</div>",
+                           HTTPD_RESP_USE_STRLEN);
+}
+
+/* Operator-requested PID tuning aid: an open-loop step-response test -
+ * commands the heater to a FIXED duty (bypassing the PID entirely) and logs
+ * every tick (mode="STEPTEST" in the same CSV above) so the resulting
+ * bean-temp rise curve can be used to characterize the plant's real thermal
+ * lag/time constant for a proper retune, instead of guessing gains from
+ * closed-loop data alone. Fan is set separately via the existing Fan level
+ * buttons here (same /api/control action="set_fan" the dashboard uses) -
+ * this hardware heats via forced air through the coil, so the fan can never
+ * be off during a real heat test. */
+static void send_step_test_section(httpd_req_t *req)
+{
+    int active_pct = profile_curve_follower_get_step_test_heater_pct();
+    char buf[640];
+    httpd_resp_send_chunk(req, "<h2>PID Tuning: Step-Response Test</h2>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req,
+                           "<p class='sub'>Bypasses the PID: commands the heater to a fixed duty so you can record "
+                           "how bean temp actually rises/settles. Set the fan level first (below), then Start. "
+                           "Stop returns control to Manual/Profile mode and forces the heater off.</p>",
+                           HTTPD_RESP_USE_STRLEN);
+
+    snprintf(buf, sizeof(buf),
+             "<p><b>Status:</b> %s</p>"
+             "<div class='btnrow'>"
+             "<button data-fan='0'>Fan Off</button><button data-fan='1'>Fan L1 (60%%)</button>"
+             "<button data-fan='2'>Fan L2 (70%%)</button><button data-fan='3'>Fan L3 (80%%)</button>"
+             "<button data-fan='4'>Fan L4 (90%%)</button><button data-fan='5'>Fan L5 (100%%)</button>"
+             "</div>"
+             "<div class='btnrow'>"
+             "<input id='stepTestPct' type='number' min='0' max='100' value='%d' style='width:5em'> %%"
+             "<button id='stepTestStartBtn'>Start</button>"
+             "<button id='stepTestStopBtn' class='danger'>Stop</button>"
+             "</div>",
+             (active_pct >= 0) ? "RUNNING" : "stopped", (active_pct >= 0) ? active_pct : 50);
+    httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
+}
+
+/* Operator-requested live PID tuning UI - see the /api/pid_tuning handlers.
+ * Changing gains here takes effect on the very next control tick (and resets
+ * the integral), so a tuning session doesn't need a rebuild/OTA per attempt. */
+static void send_pid_tuning_section(httpd_req_t *req)
+{
+    heater_pid_tuning_t t;
+    heater_pid_get_tuning(&t);
+
+    char buf[768];
+    httpd_resp_send_chunk(req, "<h2>PID Tuning: Live Gains</h2>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req,
+                           "<p class='sub'>Applies immediately to the running controller and resets the integral. "
+                           "'Apply' is RAM-only (lost on reboot); 'Apply &amp; Save' also persists to NVS. "
+                           "API: <code>GET/POST /api/pid_tuning</code> (form fields kp, ki, kd, margin_c, persist).</p>",
+                           HTTPD_RESP_USE_STRLEN);
+
+    snprintf(buf, sizeof(buf),
+             "<div class='btnrow'>"
+             "<label>Kp <input id='pidKp' type='number' step='0.01' min='0' value='%.4f' style='width:6em'></label>"
+             "<label>Ki <input id='pidKi' type='number' step='0.001' min='0' value='%.4f' style='width:6em'></label>"
+             "<label>Kd <input id='pidKd' type='number' step='0.1' min='0' value='%.4f' style='width:6em'></label>"
+             "<label>Cutoff margin &deg;C <input id='pidMargin' type='number' step='0.5' min='0.5' value='%.2f' style='width:6em'></label>"
+             "</div>"
+             "<div class='btnrow'>"
+             "<button id='pidTuneApplyBtn'>Apply</button>"
+             "<button id='pidTuneSaveBtn'>Apply &amp; Save</button>"
+             "<span id='pidTuneStatus' class='sub'></span>"
+             "</div>",
+             (double)t.kp, (double)t.ki, (double)t.kd, (double)t.hard_overshoot_margin_c);
+    httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t diagnostics_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -200,15 +297,146 @@ static esp_err_t diagnostics_get_handler(httpd_req_t *req)
                            HTTPD_RESP_USE_STRLEN);
 
     send_system_section(req);
+    send_pid_log_section(req);
+    send_pid_tuning_section(req);
+    send_step_test_section(req);
     send_heap_section(req, "Internal RAM (heap)", MALLOC_CAP_INTERNAL);
     send_heap_section(req, "PSRAM (external RAM)", MALLOC_CAP_SPIRAM);
     send_nvs_section(req);
     send_tasks_section(req);
 
+    httpd_resp_send_chunk(req,
+                           "<script>"
+                           "document.getElementById('pidLogClearBtn').addEventListener('click',function(){"
+                           "if(!confirm('Clear the PID tuning log?'))return;"
+                           "fetch('/api/pid_log/clear',{method:'POST'}).then(function(){location.reload();});"
+                           "});"
+                           "function postControl(action,value){"
+                           "return fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+                           "body:'action='+action+'&value='+value});"
+                           "}"
+                           "document.querySelectorAll('[data-fan]').forEach(function(btn){"
+                           "btn.addEventListener('click',function(){postControl('set_fan',btn.getAttribute('data-fan'));});"
+                           "});"
+                           "document.getElementById('stepTestStartBtn').addEventListener('click',function(){"
+                           "var pct=document.getElementById('stepTestPct').value;"
+                           "postControl('set_step_test_heater',pct).then(function(){location.reload();});"
+                           "});"
+                           "document.getElementById('stepTestStopBtn').addEventListener('click',function(){"
+                           "postControl('set_step_test_heater',-1).then(function(){location.reload();});"
+                           "});"
+                           "function applyTuning(persist){"
+                           "var b='kp='+document.getElementById('pidKp').value"
+                           "+'&ki='+document.getElementById('pidKi').value"
+                           "+'&kd='+document.getElementById('pidKd').value"
+                           "+'&margin_c='+document.getElementById('pidMargin').value"
+                           "+(persist?'&persist=1':'');"
+                           "fetch('/api/pid_tuning',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b})"
+                           ".then(function(r){return r.json();})"
+                           ".then(function(j){document.getElementById('pidTuneStatus').textContent="
+                           "'Applied: Kp='+j.kp+' Ki='+j.ki+' Kd='+j.kd+' margin='+j.margin_c+(persist?' (saved)':'');})"
+                           ".catch(function(){document.getElementById('pidTuneStatus').textContent='Failed';});"
+                           "}"
+                           "document.getElementById('pidTuneApplyBtn').addEventListener('click',function(){applyTuning(false);});"
+                           "document.getElementById('pidTuneSaveBtn').addEventListener('click',function(){applyTuning(true);});"
+                           "</script>",
+                           HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, "</div></main></div></body></html>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     ESP_LOGI(TAG, "Diagnostics page shown");
     return ESP_OK;
+}
+
+/* Streams the raw PID debug log CSV file for download - same chunked-file
+ * pattern as history_routes.c's session export. */
+static esp_err_t pid_log_download_get_handler(httpd_req_t *req)
+{
+    FILE *f = fopen("/storage/pid_debug.csv", "r");
+    if (f == NULL) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "No PID log yet");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "text/csv");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"pid_debug.csv\"");
+
+    char line[256];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        httpd_resp_send_chunk(req, line, HTTPD_RESP_USE_STRLEN);
+    }
+    fclose(f);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+static esp_err_t pid_log_clear_post_handler(httpd_req_t *req)
+{
+    esp_err_t err = pid_debug_log_clear();
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, (err == ESP_OK) ? "OK" : esp_err_to_name(err), HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+/* Operator-requested live PID tuning API ("pode criar uma API para poder
+ * acessar localmente para capturar o log e alterar os parametros em tempo
+ * real"): lets gains be read and changed while the roaster is running, so a
+ * tuning session iterates in seconds instead of one rebuild+OTA per attempt.
+ *
+ *   GET  /api/pid_tuning  -> {"kp":1.5,"ki":0.034,"kd":5.3,"margin_c":8.0}
+ *   POST /api/pid_tuning  -> form-encoded kp/ki/kd/margin_c (any subset;
+ *                            omitted fields keep their current value),
+ *                            plus optional persist=1 to save to NVS.
+ */
+static esp_err_t pid_tuning_get_handler(httpd_req_t *req)
+{
+    heater_pid_tuning_t t;
+    heater_pid_get_tuning(&t);
+
+    char body[160];
+    snprintf(body, sizeof(body), "{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f,\"margin_c\":%.2f}", (double)t.kp,
+             (double)t.ki, (double)t.kd, (double)t.hard_overshoot_margin_c);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+/** Reads one float field from a form-encoded body, or leaves `*out` as-is (negative sentinel) when absent. */
+static void parse_float_field(const char *body, const char *key, float *out)
+{
+    char param[32];
+    if (httpd_query_key_value(body, key, param, sizeof(param)) == ESP_OK) {
+        *out = strtof(param, NULL);
+    }
+}
+
+static esp_err_t pid_tuning_post_handler(httpd_req_t *req)
+{
+    char body[192];
+    int received = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    /* Negative sentinels mean "field not supplied" - heater_pid_set_tuning()
+     * leaves those gains untouched. */
+    heater_pid_tuning_t t = { .kp = -1.0f, .ki = -1.0f, .kd = -1.0f, .hard_overshoot_margin_c = -1.0f };
+    parse_float_field(body, "kp", &t.kp);
+    parse_float_field(body, "ki", &t.ki);
+    parse_float_field(body, "kd", &t.kd);
+    parse_float_field(body, "margin_c", &t.hard_overshoot_margin_c);
+
+    char persist_param[8] = { 0 };
+    bool persist = (httpd_query_key_value(body, "persist", persist_param, sizeof(persist_param)) == ESP_OK) &&
+                   (strcmp(persist_param, "1") == 0);
+
+    esp_err_t err = heater_pid_set_tuning(&t, persist);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+    return pid_tuning_get_handler(req); /* Echo back the values now in effect. */
 }
 
 esp_err_t diagnostics_routes_register(httpd_handle_t server)
@@ -218,6 +446,31 @@ esp_err_t diagnostics_routes_register(httpd_handle_t server)
     if (err != ESP_OK) {
         return err;
     }
-    ESP_LOGI(TAG, "Diagnostics routes registered (/diagnostics)");
+
+    httpd_uri_t download_uri = { .uri = "/api/pid_log/download", .method = HTTP_GET, .handler = pid_log_download_get_handler };
+    err = httpd_register_uri_handler(server, &download_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t clear_uri = { .uri = "/api/pid_log/clear", .method = HTTP_POST, .handler = pid_log_clear_post_handler };
+    err = httpd_register_uri_handler(server, &clear_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t tuning_get_uri = { .uri = "/api/pid_tuning", .method = HTTP_GET, .handler = pid_tuning_get_handler };
+    err = httpd_register_uri_handler(server, &tuning_get_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t tuning_post_uri = { .uri = "/api/pid_tuning", .method = HTTP_POST, .handler = pid_tuning_post_handler };
+    err = httpd_register_uri_handler(server, &tuning_post_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Diagnostics routes registered (/diagnostics, /api/pid_log/*, /api/pid_tuning)");
     return ESP_OK;
 }

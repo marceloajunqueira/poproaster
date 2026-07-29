@@ -14,7 +14,9 @@
 #include "roast_core/command_dispatcher.h"
 #include "roast_core/roast_telemetry_service.h"
 #include "roast_core/roast_events.h"
+#include "roast_core/profile_curve_follower.h"
 #include "storage/profile_store.h"
+#include "hal/fan_pwm.h"
 #include "safety/safety_manager.h"
 
 static const char *TAG = "dashboard_routes";
@@ -300,6 +302,20 @@ static void ws_broadcast_timer_cb(void *arg)
                                   (double)profile.points[i].target_temp_c, (unsigned)profile.points[i].target_fan_pct);
         }
     }
+    /* Defensive clamp: snprintf() returns the length it WOULD have written
+     * even when truncated, so a run of near-boundary calls could in theory
+     * push segs_len past sizeof(segs) - the loop guard above only checks
+     * BEFORE each iteration, not after the last one. Without this clamp,
+     * `sizeof(segs) - segs_len` below would underflow (size_t) into a huge
+     * value and `segs + segs_len` would point past the buffer - an
+     * out-of-bounds write. Not currently reachable (point_count is capped
+     * at ROAST_PROFILE_MAX_POINTS=20 with a lot of margin in 900 bytes),
+     * but cheap to make structurally safe regardless. */
+    if (segs_len < 0) {
+        segs_len = 0;
+    } else if (segs_len > (int)sizeof(segs) - 1) {
+        segs_len = (int)sizeof(segs) - 1;
+    }
     snprintf(segs + segs_len, sizeof(segs) - segs_len, "]");
     uint32_t duration_s = has_profile ? roast_profile_total_duration_s(&profile) : 0;
 
@@ -316,6 +332,12 @@ static void ws_broadcast_timer_cb(void *arg)
     for (size_t i = 0; i < event_count && events_len < (int)sizeof(events_json) - 24; i++) {
         events_len += snprintf(events_json + events_len, sizeof(events_json) - events_len, "%s[%lld,%d]",
                                 i == 0 ? "" : ",", (long long)events[i].elapsed_ms, (int)events[i].type);
+    }
+    /* Same defensive clamp as `segs` above - see comment there. */
+    if (events_len < 0) {
+        events_len = 0;
+    } else if (events_len > (int)sizeof(events_json) - 1) {
+        events_len = (int)sizeof(events_json) - 1;
     }
     snprintf(events_json + events_len, sizeof(events_json) - events_len, "]");
 
@@ -382,9 +404,21 @@ static esp_err_t control_post_handler(httpd_req_t *req)
 
     esp_err_t err;
     if (strcmp(action, "set_fan") == 0) {
-        err = command_dispatcher_set_fan_pct((uint8_t)value, SAFETY_CMD_SOURCE_WEB);
-    } else if (strcmp(action, "set_heater") == 0) {
-        err = command_dispatcher_set_heater_pct((uint8_t)value, SAFETY_CMD_SOURCE_WEB);
+        /* Per the display's Manual Control screen model: the fan only has
+         * 5 usable discrete speeds - `value` here is a LEVEL (0-5), not a
+         * raw percentage; convert before applying. */
+        err = command_dispatcher_set_fan_pct(fan_pwm_level_to_pct((uint8_t)value), SAFETY_CMD_SOURCE_WEB);
+    } else if (strcmp(action, "set_target_temp") == 0) {
+        /* Per the display's Manual Control screen model: the heater is
+         * never a direct setpoint - the operator picks a target BEAN
+         * TEMPERATURE and the same closed-loop PID (profile_curve_follower.c)
+         * drives the actual heater duty toward it automatically. This is a
+         * plain state variable (not a hardware command), so it's set
+         * directly here exactly like the display does - not gated through
+         * command_dispatcher, which is reserved for actual fan/heater
+         * hardware commands. */
+        profile_curve_follower_set_manual_target_temp_c((float)value);
+        err = ESP_OK;
     } else if (strcmp(action, "pause") == 0) {
         err = command_dispatcher_pause_session(SAFETY_CMD_SOURCE_WEB);
     } else if (strcmp(action, "resume") == 0) {
@@ -412,6 +446,16 @@ static esp_err_t control_post_handler(httpd_req_t *req)
         if (err == ESP_OK) {
             roast_telemetry_service_on_roast_started();
         }
+    } else if (strcmp(action, "set_step_test_heater") == 0) {
+        /* PID tuning aid (Diagnostics page): open-loop step-response test -
+         * bypasses the PID entirely at a fixed heater duty so the resulting
+         * bean-temp curve can be used to characterize the plant's real
+         * thermal lag. value=-1 stops it; 0-100 is the fixed duty. Fan is
+         * NOT touched here - operator sets/keeps it via the existing Fan
+         * control, since this hardware heats via forced air through the
+         * coil (fan can't be off during a real heat test). */
+        profile_curve_follower_set_step_test_heater_pct(value);
+        err = ESP_OK;
     } else {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown action");
         return ESP_FAIL;
@@ -648,12 +692,27 @@ static const char *DASHBOARD_SCRIPT =
     "document.getElementById('ackBtn').addEventListener('click',function(){post('ack_alarm');});"
     "document.getElementById('switchManualBtn').addEventListener('click',function(){"
     "if(confirm('Switch to Manual/Artisan mode? This cannot be undone for this roast.'))post('switch_manual',1);});"
+    /* Fan override: matches the display's Manual Control screen model -
+     * the fan only has 5 usable discrete speeds (0=off, 1-5=60/70/80/90/100%),
+     * applied immediately on release (no separate Apply step, same as the
+     * on-device +/-/Parar buttons). */
+    "var FAN_LEVEL_PCT=[0,60,70,80,90,100];"
     "var fanSlider=document.getElementById('fanSlider');"
-    "fanSlider.addEventListener('input',function(){setText('fanSliderVal',this.value+'%');});"
+    "fanSlider.addEventListener('input',function(){"
+    "var l=parseInt(this.value,10);setText('fanSliderVal','Level '+l+' ('+FAN_LEVEL_PCT[l]+'%)');});"
     "fanSlider.addEventListener('change',function(){post('set_fan',this.value);});"
-    "var heaterSlider=document.getElementById('heaterSlider');"
-    "heaterSlider.addEventListener('input',function(){setText('heaterSliderVal',this.value+'%');});"
-    "heaterSlider.addEventListener('change',function(){post('set_heater',this.value);});"
+    /* Target Temp: matches the display's Manual Control screen model - the
+     * heater is never a direct setpoint; the operator stages a target BEAN
+     * TEMPERATURE and must tap "Apply" to commit it (guards against
+     * accidentally starting the heater toward the wrong temp from a slip
+     * of the slider), plus a "Turn Off" button that zeroes and applies
+     * immediately. */
+    "var targetSlider=document.getElementById('targetSlider');"
+    "targetSlider.addEventListener('input',function(){setText('targetSliderVal',this.value+' C (tap Apply)');});"
+    "document.getElementById('targetApplyBtn').addEventListener('click',function(){"
+    "post('set_target_temp',targetSlider.value);setText('targetSliderVal',targetSlider.value+' C');});"
+    "document.getElementById('targetOffBtn').addEventListener('click',function(){"
+    "targetSlider.value=0;setText('targetSliderVal','0 C');post('set_target_temp',0);});"
     "window.addEventListener('resize',draw);"
     "})();"
     "</script>";
@@ -693,10 +752,14 @@ void dashboard_routes_send_page(httpd_req_t *req)
                            "<div class='stat'><div class='label'>DTR%</div><div class='value' id='dtr'>--</div></div>"
                            "<div class='stat'><div class='label'>Fan / Heater</div><div class='value'><span id='fan'>0%</span> / <span id='heater'>0%</span></div></div>"
                            "</div>"
-                           "<div class='sliderrow'><div class='label'><span>Fan override</span><span id='fanSliderVal'>--</span></div>"
-                           "<input type='range' id='fanSlider' min='0' max='100' step='5' value='0'></div>"
-                           "<div class='sliderrow'><div class='label'><span>Heater override</span><span id='heaterSliderVal'>--</span></div>"
-                           "<input type='range' id='heaterSlider' min='0' max='100' step='5' value='0'></div>"
+                           "<div class='sliderrow'><div class='label'><span>Fan override (Level)</span><span id='fanSliderVal'>--</span></div>"
+                           "<input type='range' id='fanSlider' min='0' max='5' step='1' value='0'></div>"
+                           "<div class='sliderrow'><div class='label'><span>Target Temp</span><span id='targetSliderVal'>--</span></div>"
+                           "<input type='range' id='targetSlider' min='0' max='260' step='1' value='0'></div>"
+                           "<div class='btnrow'>"
+                           "<button id='targetApplyBtn'>Apply Target Temp</button>"
+                           "<button id='targetOffBtn' class='danger'>Turn Off Heater</button>"
+                           "</div>"
                            "<div class='btnrow'>"
                            "<button id='startBtn' class='primary'>Start Roast</button>"
                            "<button id='chargeBtn' class='primary' style='display:none'>Charge</button>"
