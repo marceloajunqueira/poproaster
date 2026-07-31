@@ -32,8 +32,8 @@ extern "C" {
 #define ROAST_PROFILE_NAME_MAX_LEN 32
 #define ROAST_PROFILE_MAX_POINTS 20
 
-/** Fan may never drop below this while the heater could be active - normal (non-Cooling) segments must keep target_fan_pct at/above this floor (enforced both by the profile editor UI and, independently, by the Safety Manager at the point commands are actually applied). Matches SAFETY_FAN_MIN_PCT_DURING_HEAT / Level 1 (hal/fan_pwm.h's fan physical minimum operating duty). Fan speed is quantized to 5 discrete levels (60/70/80/90/100%, see hal/fan_pwm.h) - this is Level 1's percentage, the lowest non-cooling segments may use. */
-#define ROAST_PROFILE_FAN_MIN_PCT 60
+/** Fan may never drop below this while the heater could be active - normal (non-Cooling) segments must keep target_fan_pct at/above this floor (enforced both by the profile editor UI and, independently, by the Safety Manager at the point commands are actually applied). Matches SAFETY_FAN_MIN_PCT_DURING_HEAT / Level 1 (hal/fan_pwm.h's fan physical minimum operating duty). Fan speed is quantized to 3 discrete levels (80/90/100%, see hal/fan_pwm.h) - this is Level 1's percentage, the lowest non-cooling segments may use. */
+#define ROAST_PROFILE_FAN_MIN_PCT 80
 
 /** Cooling segments always use these two fixed values - not editable/stored as a choice, just implied by is_cooling (see below). */
 #define ROAST_PROFILE_COOLING_TEMP_C 0.0f

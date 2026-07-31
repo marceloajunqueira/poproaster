@@ -23,13 +23,18 @@ esp_err_t web_api_server_init(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
-    /* Default is 8 - this project now registers 18 routes across
+    /* Default is 8 - this project now registers 27 routes across
      * wifi_setup_routes.c/dashboard_routes.c/history_routes.c/
      * presets_routes.c/diagnostics_routes.c/ota_routes.c, so the default
-     * silently drops the last ones registered (httpd_register_uri_handler
-     * starts failing with ESP_ERR_NO_MEM once full) unless raised. Bumped
-     * to 26 for headroom beyond the current count. */
-    config.max_uri_handlers = 26;
+     * silently drops the last ones registered. Past this limit,
+     * httpd_register_uri_handler returns ESP_ERR_HTTPD_HANDLERS_FULL, which
+     * the last caller in server.c (ota_routes_register) wraps in
+     * ESP_ERROR_CHECK() in main.c - a boot-time abort()/reboot LOOP, not a
+     * silent drop, once the count reaches this ceiling (hit in production
+     * after the pid_autotune routes were added and this constant wasn't
+     * bumped to match - always update this alongside any new
+     * *_routes_register() route). Bumped to 40 for real headroom. */
+    config.max_uri_handlers = 40;
     /* Default is 7. The live dashboard now holds a WebSocket connection
      * open for as long as its browser tab stays open (/ws/telemetry), so
      * each open tab permanently ties up one socket instead of the usual

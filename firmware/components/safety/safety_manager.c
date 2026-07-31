@@ -160,7 +160,7 @@ void safety_manager_on_temperature_sample(float bean_temp_c, bool sensor_valid)
     }
 
     if (bean_temp_c >= SAFETY_TEMP_ABSOLUTE_CUTOFF_C) {
-        raise_critical_alarm(SAFETY_ALARM_TEMP_ABSOLUTE_CUTOFF, "260C absolute safety cutoff reached");
+        raise_critical_alarm(SAFETY_ALARM_TEMP_ABSOLUTE_CUTOFF, "240C absolute safety cutoff reached");
         return;
     }
 

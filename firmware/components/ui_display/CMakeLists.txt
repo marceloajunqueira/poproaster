@@ -15,6 +15,7 @@ idf_component_register(
         "screens/sensor_calibration.c"
         "screens/wifi_setup.c"
         "screens/heater_settings.c"
+        "screens/pid_autotune_screen.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

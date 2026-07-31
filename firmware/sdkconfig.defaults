@@ -49,3 +49,16 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 # of 10 got tight once combined with the httpd server's own socket use
 # (see web_api/server.c's max_open_sockets=10 + lru_purge_enable).
 CONFIG_LWIP_MAX_SOCKETS=16
+
+# Safety hardening (2026-07-31, ahead of removing the physical bimetallic
+# thermal protector): every periodic esp_timer callback in this firmware -
+# including the SSR PWM window and the safety manager's own 240C absolute-
+# cutoff temperature check - runs on ONE shared esp_timer task. If that task
+# ever hung (bug in any callback), the SSR GPIO would freeze at its last
+# state AND the cutoff would simply stop being checked, with nothing left
+# to catch it once the physical thermostat is gone. profile_curve_follower.c
+# now subscribes that task to the Task Watchdog and resets it every control
+# tick; PANIC (disabled by default) must be on for a real hang to actually
+# reboot the board (safe: GPIOs default OFF at boot) instead of just logging
+# a warning and hanging forever.
+CONFIG_ESP_TASK_WDT_PANIC=y

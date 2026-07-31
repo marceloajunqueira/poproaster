@@ -99,6 +99,34 @@ static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t 
     lv_disp_flush_ready(drv);
 }
 
+esp_err_t ui_display_panel_attach_touch(esp_lcd_touch_handle_t touch_handle)
+{
+    static bool s_touch_attached;
+    if (touch_handle == NULL || s_lv_display == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_touch_attached) {
+        return ESP_OK;
+    }
+    if (!lvgl_port_lock(0)) {
+        ESP_LOGE(TAG, "ui_display_panel_attach_touch: failed to acquire LVGL lock");
+        return ESP_FAIL;
+    }
+    const lvgl_port_touch_cfg_t touch_cfg = {
+        .disp = s_lv_display,
+        .handle = touch_handle,
+    };
+    lv_indev_t *indev = lvgl_port_add_touch(&touch_cfg);
+    lvgl_port_unlock();
+    if (indev == NULL) {
+        ESP_LOGW(TAG, "ui_display_panel_attach_touch: lvgl_port_add_touch failed");
+        return ESP_FAIL;
+    }
+    s_touch_attached = true;
+    ESP_LOGI(TAG, "Touch attached to LVGL");
+    return ESP_OK;
+}
+
 esp_err_t ui_display_panel_init(void)
 {
     esp_err_t err = backlight_init();
@@ -149,15 +177,9 @@ esp_err_t ui_display_panel_init(void)
 
     esp_lcd_touch_handle_t touch_handle = touch_driver_get_handle();
     if (touch_handle != NULL) {
-        const lvgl_port_touch_cfg_t touch_cfg = {
-            .disp = s_lv_display,
-            .handle = touch_handle,
-        };
-        if (lvgl_port_add_touch(&touch_cfg) == NULL) {
-            ESP_LOGW(TAG, "lvgl_port_add_touch failed - continuing without touch input");
-        }
+        ui_display_panel_attach_touch(touch_handle);
     } else {
-        ESP_LOGW(TAG, "No touch handle available - call touch_driver_init() before ui_display_panel_init()");
+        ESP_LOGW(TAG, "No touch handle available yet - will attach automatically if/when the GT911 comes up");
     }
 
     ESP_LOGI(TAG, "Display panel init OK (%dx%d, %s, backlight=%d%%)",

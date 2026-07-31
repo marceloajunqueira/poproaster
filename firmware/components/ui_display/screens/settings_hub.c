@@ -11,6 +11,7 @@
 #include "ui_display/screens/sensor_calibration.h"
 #include "ui_display/screens/wifi_setup.h"
 #include "ui_display/screens/heater_settings.h"
+#include "ui_display/screens/pid_autotune_screen.h"
 #include "ui_display/screens/settings_hub.h"
 
 static const char *TAG = "settings_hub";
@@ -73,6 +74,16 @@ static void heater_settings_btn_event_cb(lv_event_t *e)
     lv_obj_t *parent = (lv_obj_t *)lv_event_get_user_data(e);
     lv_obj_clean(parent);
     heater_settings_show_in(parent);
+}
+
+static void pid_autotune_btn_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    lv_obj_t *parent = (lv_obj_t *)lv_event_get_user_data(e);
+    lv_obj_clean(parent);
+    pid_autotune_screen_show_in(parent);
 }
 
 /* T055: cycles EN -> PT -> ES -> EN, persists the choice (i18n_set_language()
@@ -145,6 +156,8 @@ static void build_menu(lv_obj_t *parent)
                     wifi_setup_btn_event_cb, parent);
     make_grid_tile(parent, col_x[1], row_y[1], col_w, LV_SYMBOL_CHARGE, "Max Heater Power",
                     heater_settings_btn_event_cb, parent);
+    make_grid_tile(parent, col_x[1], row_y[2], col_w, LV_SYMBOL_LOOP, i18n_get(I18N_KEY_PID_AUTOTUNE),
+                    pid_autotune_btn_event_cb, parent);
 
     char lang_buf[40];
     snprintf(lang_buf, sizeof(lang_buf), "%s: %s", i18n_get(I18N_KEY_LANGUAGE), i18n_get_language_code(i18n_get_language()));
@@ -181,4 +194,5 @@ void settings_hub_hide(void)
     peripheral_test_hide();
     sensor_calibration_hide();
     heater_settings_hide();
+    pid_autotune_screen_hide();
 }

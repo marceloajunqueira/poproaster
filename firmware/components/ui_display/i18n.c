@@ -33,6 +33,28 @@ static const char *const kStringsEn[I18N_KEY_COUNT] = {
     [I18N_KEY_SENSOR_CALIBRATION] = "Sensor Calibration",
     [I18N_KEY_WIFI_SETUP] = "Wi-Fi Setup",
     [I18N_KEY_LANGUAGE] = "Language",
+    [I18N_KEY_BACK] = "Back",
+    [I18N_KEY_PID_AUTOTUNE] = "PID Autotune",
+    [I18N_KEY_PID_AUTOTUNE_NOTE] =
+        "Raises the fan to full speed, then cycles the heater on/off around 130C for several minutes "
+        "to find PID gains (noisy, temp will swing). Self-aborts on any issue; saves the result "
+        "automatically on success.",
+    [I18N_KEY_PID_AUTOTUNE_CONSENT] = "I understand the risks and want to start the autotune",
+    [I18N_KEY_PID_AUTOTUNE_START] = "Start",
+    [I18N_KEY_PID_AUTOTUNE_CANCEL] = "Cancel",
+    [I18N_KEY_PID_AUTOTUNE_STATE_IDLE] = "Idle",
+    [I18N_KEY_PID_AUTOTUNE_STATE_RUNNING] = "Running",
+    [I18N_KEY_PID_AUTOTUNE_STATE_SUCCEEDED] = "Succeeded",
+    [I18N_KEY_PID_AUTOTUNE_STATE_FAILED] = "Failed",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_IDLE] = "Idle - check the box below, then Start.",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_PREPARING] = "Preparing - raising fan to full speed...",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_FMT] = "%s - %us elapsed, %u phases - %s",
+    [I18N_KEY_PID_AUTOTUNE_START_ERROR_FMT] = "Could not start: %s",
+    [I18N_KEY_PID_AUTOTUNE_RESULT_APPLIED_FMT] =
+        "Applied automatically (No-Overshoot rule, saved to NVS):\nKp=%.3f Ki=%.4f Kd=%.2f",
+    [I18N_KEY_PID_AUTOTUNE_RESULT_FAILED] = "No gains were applied.",
+    [I18N_KEY_PID_AUTOTUNE_LIVE_FMT] = "Fan: %d%%   BT: %.1fC   Heater: %d%%",
+    [I18N_KEY_PID_AUTOTUNE_LIVE_FMT_NO_BT] = "Fan: %d%%   BT: --   Heater: %d%%",
 };
 
 static const char *const kStringsPt[I18N_KEY_COUNT] = {
@@ -53,6 +75,28 @@ static const char *const kStringsPt[I18N_KEY_COUNT] = {
     [I18N_KEY_SENSOR_CALIBRATION] = "Calibracao do Sensor",
     [I18N_KEY_WIFI_SETUP] = "Configurar Wi-Fi",
     [I18N_KEY_LANGUAGE] = "Idioma",
+    [I18N_KEY_BACK] = "Voltar",
+    [I18N_KEY_PID_AUTOTUNE] = "Autoajuste PID",
+    [I18N_KEY_PID_AUTOTUNE_NOTE] =
+        "Eleva o ventilador ao maximo e liga/desliga o aquecedor perto de 130C por alguns minutos "
+        "para encontrar os ganhos do PID (barulhento, a temperatura vai oscilar). Cancela sozinho "
+        "se algo der errado; salva o resultado automaticamente ao concluir.",
+    [I18N_KEY_PID_AUTOTUNE_CONSENT] = "Estou ciente dos riscos e quero iniciar o autoajuste",
+    [I18N_KEY_PID_AUTOTUNE_START] = "Iniciar",
+    [I18N_KEY_PID_AUTOTUNE_CANCEL] = "Cancelar",
+    [I18N_KEY_PID_AUTOTUNE_STATE_IDLE] = "Ocioso",
+    [I18N_KEY_PID_AUTOTUNE_STATE_RUNNING] = "Executando",
+    [I18N_KEY_PID_AUTOTUNE_STATE_SUCCEEDED] = "Concluido",
+    [I18N_KEY_PID_AUTOTUNE_STATE_FAILED] = "Falhou",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_IDLE] = "Ocioso - marque a caixa abaixo e depois toque em Iniciar.",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_PREPARING] = "Preparando - elevando o ventilador a velocidade maxima...",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_FMT] = "%s - %us decorridos, %u fases - %s",
+    [I18N_KEY_PID_AUTOTUNE_START_ERROR_FMT] = "Nao foi possivel iniciar: %s",
+    [I18N_KEY_PID_AUTOTUNE_RESULT_APPLIED_FMT] =
+        "Aplicado automaticamente (regra Sem Overshoot, salvo na memoria):\nKp=%.3f Ki=%.4f Kd=%.2f",
+    [I18N_KEY_PID_AUTOTUNE_RESULT_FAILED] = "Nenhum ganho foi aplicado.",
+    [I18N_KEY_PID_AUTOTUNE_LIVE_FMT] = "Fan: %d%%   BT: %.1fC   Aquecedor: %d%%",
+    [I18N_KEY_PID_AUTOTUNE_LIVE_FMT_NO_BT] = "Fan: %d%%   BT: --   Aquecedor: %d%%",
 };
 
 static const char *const kStringsEs[I18N_KEY_COUNT] = {
@@ -73,6 +117,28 @@ static const char *const kStringsEs[I18N_KEY_COUNT] = {
     [I18N_KEY_SENSOR_CALIBRATION] = "Calibracion del Sensor",
     [I18N_KEY_WIFI_SETUP] = "Configurar Wi-Fi",
     [I18N_KEY_LANGUAGE] = "Idioma",
+    [I18N_KEY_BACK] = "Volver",
+    [I18N_KEY_PID_AUTOTUNE] = "Autoajuste PID",
+    [I18N_KEY_PID_AUTOTUNE_NOTE] =
+        "Eleva el ventilador al maximo y enciende/apaga el calentador cerca de 130C por varios "
+        "minutos para encontrar las ganancias del PID (ruidoso, la temperatura oscilara). Se cancela "
+        "solo si algo falla; guarda el resultado automaticamente al finalizar.",
+    [I18N_KEY_PID_AUTOTUNE_CONSENT] = "Soy consciente de los riesgos y quiero iniciar el autoajuste",
+    [I18N_KEY_PID_AUTOTUNE_START] = "Iniciar",
+    [I18N_KEY_PID_AUTOTUNE_CANCEL] = "Cancelar",
+    [I18N_KEY_PID_AUTOTUNE_STATE_IDLE] = "Inactivo",
+    [I18N_KEY_PID_AUTOTUNE_STATE_RUNNING] = "Ejecutando",
+    [I18N_KEY_PID_AUTOTUNE_STATE_SUCCEEDED] = "Completado",
+    [I18N_KEY_PID_AUTOTUNE_STATE_FAILED] = "Fallido",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_IDLE] = "Inactivo - marque la casilla abajo y luego toque Iniciar.",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_PREPARING] = "Preparando - elevando el ventilador a velocidad maxima...",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_FMT] = "%s - %us transcurridos, %u fases - %s",
+    [I18N_KEY_PID_AUTOTUNE_START_ERROR_FMT] = "No se pudo iniciar: %s",
+    [I18N_KEY_PID_AUTOTUNE_RESULT_APPLIED_FMT] =
+        "Aplicado automaticamente (regla Sin Sobreimpulso, guardado en memoria):\nKp=%.3f Ki=%.4f Kd=%.2f",
+    [I18N_KEY_PID_AUTOTUNE_RESULT_FAILED] = "No se aplico ninguna ganancia.",
+    [I18N_KEY_PID_AUTOTUNE_LIVE_FMT] = "Fan: %d%%   BT: %.1fC   Calentador: %d%%",
+    [I18N_KEY_PID_AUTOTUNE_LIVE_FMT_NO_BT] = "Fan: %d%%   BT: --   Calentador: %d%%",
 };
 
 esp_err_t i18n_init(void)

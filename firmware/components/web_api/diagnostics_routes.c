@@ -18,7 +18,9 @@
 
 #include "roast_core/pid_debug_log.h"
 #include "roast_core/heater_pid.h"
+#include "roast_core/pid_autotune.h"
 #include "roast_core/profile_curve_follower.h"
+#include "hal/touch_driver.h"
 #include "web_api/diagnostics_routes.h"
 #include "web_api/dashboard_routes.h"
 
@@ -118,6 +120,14 @@ static void send_system_section(httpd_req_t *req)
     send_stat_row(req, "Uptime", buf);
 
     send_stat_row(req, "Last reset reason", reset_reason_str(esp_reset_reason()));
+
+    /* Operator-reported bug: touch occasionally goes dead mid-session until
+     * power-cycled - see touch_driver.c's read_data recovery wrapper. A
+     * nonzero count here confirms it happened (and self-recovered) without
+     * needing a reboot. */
+    char touch_buf[32];
+    snprintf(touch_buf, sizeof(touch_buf), "%u", (unsigned)touch_driver_get_recovery_count());
+    send_stat_row(req, "Touch (GT911) auto-recoveries", touch_buf);
 
     httpd_resp_send_chunk(req, "</table>", HTTPD_RESP_USE_STRLEN);
 }
@@ -232,9 +242,8 @@ static void send_step_test_section(httpd_req_t *req)
     snprintf(buf, sizeof(buf),
              "<p><b>Status:</b> %s</p>"
              "<div class='btnrow'>"
-             "<button data-fan='0'>Fan Off</button><button data-fan='1'>Fan L1 (60%%)</button>"
-             "<button data-fan='2'>Fan L2 (70%%)</button><button data-fan='3'>Fan L3 (80%%)</button>"
-             "<button data-fan='4'>Fan L4 (90%%)</button><button data-fan='5'>Fan L5 (100%%)</button>"
+             "<button data-fan='0'>Fan Off</button><button data-fan='1'>Fan L1 (80%%)</button>"
+             "<button data-fan='2'>Fan L2 (90%%)</button><button data-fan='3'>Fan L3 (100%%)</button>"
              "</div>"
              "<div class='btnrow'>"
              "<input id='stepTestPct' type='number' min='0' max='100' value='%d' style='width:5em'> %%"
@@ -277,6 +286,55 @@ static void send_pid_tuning_section(httpd_req_t *req)
     httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
 }
 
+/* Relay-feedback autotune UI - see the /api/pid_autotune handlers. The
+ * setpoint deliberately defaults well below the tunnel thermostat's measured
+ * ~194 C trip point, and the relay's high output is capped, because this
+ * procedure works by making the temperature oscillate on purpose. */
+static void send_pid_autotune_section(httpd_req_t *req)
+{
+    pid_autotune_status_t st;
+    pid_autotune_get_status(&st);
+
+    const char *state_str = "idle";
+    switch (st.state) {
+    case PID_AUTOTUNE_RUNNING:   state_str = "RUNNING"; break;
+    case PID_AUTOTUNE_SUCCEEDED: state_str = "SUCCEEDED"; break;
+    case PID_AUTOTUNE_FAILED:    state_str = "FAILED"; break;
+    default: break;
+    }
+
+    char buf[1024];
+    httpd_resp_send_chunk(req, "<h2>PID Tuning: Autotune (relay method)</h2>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req,
+                           "<p class='sub'>Switches the heater between two fixed duties to make bean temp oscillate "
+                           "around the setpoint, then derives Ku/Pu and Ziegler-Nichols gains. "
+                           "Keep the setpoint well below the tunnel thermostat's trip point and set the fan level "
+                           "FIRST - the resulting gains are only valid for that airflow. Aborts by itself on "
+                           "overshoot, protector trip, fan drop or sensor fault.</p>",
+                           HTTPD_RESP_USE_STRLEN);
+
+    snprintf(buf, sizeof(buf),
+             "<p><b>Status:</b> %s &mdash; %s<br>"
+             "<span class='sub'>elapsed %us, phases %u, crossings %u, fan at start %u%%</span></p>"
+             "<div class='btnrow'>"
+             "<label>Setpoint &deg;C <input id='atSetpoint' type='number' step='1' min='40' max='200' value='%.0f' style='width:6em'></label>"
+             "<label>Relay high %% <input id='atHigh' type='number' step='1' min='1' max='100' value='%u' style='width:5em'></label>"
+             "<label>Relay low %% <input id='atLow' type='number' step='1' min='0' max='99' value='%u' style='width:5em'></label>"
+             "</div>"
+             "<div class='btnrow'>"
+             "<button id='atStartBtn'>Start Autotune</button>"
+             "<button id='atStopBtn' class='danger'>Abort</button>"
+             "<span id='atStatus' class='sub'></span>"
+             "</div>"
+             "<div id='atResult' class='sub'></div>",
+             state_str, st.message, (unsigned)st.elapsed_s, (unsigned)st.phase_count, (unsigned)st.zc_count,
+             (unsigned)st.fan_pct_at_start,
+             (double)((st.setpoint_c > 0.0f) ? st.setpoint_c : 130.0f),
+             (unsigned)((st.output_positive_pct > 0) ? st.output_positive_pct : 70),
+             (unsigned)st.output_negative_pct);
+    httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t diagnostics_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -299,6 +357,7 @@ static esp_err_t diagnostics_get_handler(httpd_req_t *req)
     send_system_section(req);
     send_pid_log_section(req);
     send_pid_tuning_section(req);
+    send_pid_autotune_section(req);
     send_step_test_section(req);
     send_heap_section(req, "Internal RAM (heap)", MALLOC_CAP_INTERNAL);
     send_heap_section(req, "PSRAM (external RAM)", MALLOC_CAP_SPIRAM);
@@ -339,6 +398,50 @@ static esp_err_t diagnostics_get_handler(httpd_req_t *req)
                            "}"
                            "document.getElementById('pidTuneApplyBtn').addEventListener('click',function(){applyTuning(false);});"
                            "document.getElementById('pidTuneSaveBtn').addEventListener('click',function(){applyTuning(true);});"
+                           "var atLast=null;"
+                           "function atRow(key,n,g){"
+                           "return '<div>'+n+': Kp='+g.kp.toFixed(3)+' Ki='+g.ki.toFixed(4)+' Kd='+g.kd.toFixed(2)"
+                           "+' <button data-gains='+key+'>Use</button></div>';"
+                           "}"
+                           "function atUse(key){"
+                           "if(!atLast)return;"
+                           "var g=atLast[key];"
+                           "document.getElementById('pidKp').value=g.kp.toFixed(4);"
+                           "document.getElementById('pidKi').value=g.ki.toFixed(4);"
+                           "document.getElementById('pidKd').value=g.kd.toFixed(4);"
+                           "document.getElementById('pidKp').scrollIntoView();"
+                           "}"
+                           "document.getElementById('atResult').addEventListener('click',function(e){"
+                           "var k=e.target.getAttribute('data-gains');if(k)atUse(k);"
+                           "});"
+                           "function atPoll(){"
+                           "fetch('/api/pid_autotune').then(function(r){return r.json();}).then(function(j){"
+                           "atLast=j;"
+                           "document.getElementById('atStatus').textContent=j.state+' - '+j.message"
+                           "+' ('+j.elapsed_s+'s, '+j.phases+' phases)';"
+                           "if(j.state==='SUCCEEDED'){"
+                           "document.getElementById('atResult').innerHTML='<b>Ku='+j.ku.toFixed(2)+' Pu='+j.pu_s.toFixed(1)+'s</b>'"
+                           "+atRow('zn_classic','Ziegler-Nichols',j.zn_classic)"
+                           "+atRow('some_overshoot','Some overshoot',j.some_overshoot)"
+                           "+atRow('no_overshoot','No overshoot',j.no_overshoot)"
+                           "+(j.zc_symmetrical?'':'<div>Warning: heating/cooling rates asymmetric - lower the relay high %</div>')"
+                           "+(j.amplitude_convergent?'':'<div>Warning: amplitude did not converge - result is unreliable</div>');"
+                           "}"
+                           "if(j.state==='RUNNING')setTimeout(atPoll,3000);"
+                           "});"
+                           "}"
+                           "document.getElementById('atStartBtn').addEventListener('click',function(){"
+                           "var b='setpoint_c='+document.getElementById('atSetpoint').value"
+                           "+'&output_positive_pct='+document.getElementById('atHigh').value"
+                           "+'&output_negative_pct='+document.getElementById('atLow').value;"
+                           "fetch('/api/pid_autotune',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b})"
+                           ".then(function(){atPoll();});"
+                           "});"
+                           "document.getElementById('atStopBtn').addEventListener('click',function(){"
+                           "fetch('/api/pid_autotune',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'abort=1'})"
+                           ".then(function(){atPoll();});"
+                           "});"
+                           "atPoll();"
                            "</script>",
                            HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, "</div></main></div></body></html>", HTTPD_RESP_USE_STRLEN);
@@ -439,6 +542,82 @@ static esp_err_t pid_tuning_post_handler(httpd_req_t *req)
     return pid_tuning_get_handler(req); /* Echo back the values now in effect. */
 }
 
+/*   GET  /api/pid_autotune -> full status + the three candidate rule sets
+ *   POST /api/pid_autotune -> form-encoded setpoint_c/output_positive_pct/
+ *                             output_negative_pct to start, or abort=1 to stop.
+ */
+static esp_err_t pid_autotune_get_handler(httpd_req_t *req)
+{
+    pid_autotune_status_t st;
+    pid_autotune_get_status(&st);
+
+    const char *state_str = "IDLE";
+    switch (st.state) {
+    case PID_AUTOTUNE_RUNNING:   state_str = "RUNNING"; break;
+    case PID_AUTOTUNE_SUCCEEDED: state_str = "SUCCEEDED"; break;
+    case PID_AUTOTUNE_FAILED:    state_str = "FAILED"; break;
+    default: break;
+    }
+
+    char body[640];
+    snprintf(body, sizeof(body),
+             "{\"state\":\"%s\",\"message\":\"%s\",\"setpoint_c\":%.1f,\"fan_pct\":%u,\"elapsed_s\":%u,"
+             "\"phases\":%u,\"crossings\":%u,\"ku\":%.4f,\"pu_s\":%.2f,"
+             "\"zc_symmetrical\":%s,\"amplitude_convergent\":%s,"
+             "\"zn_classic\":{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f},"
+             "\"some_overshoot\":{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f},"
+             "\"no_overshoot\":{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f}}",
+             state_str, st.message, (double)st.setpoint_c, (unsigned)st.fan_pct_at_start,
+             (unsigned)st.elapsed_s, (unsigned)st.phase_count, (unsigned)st.zc_count, (double)st.ku,
+             (double)st.pu_s, st.zc_symmetrical ? "true" : "false",
+             st.amplitude_convergent ? "true" : "false", (double)st.zn_classic.kp, (double)st.zn_classic.ki,
+             (double)st.zn_classic.kd, (double)st.some_overshoot.kp, (double)st.some_overshoot.ki,
+             (double)st.some_overshoot.kd, (double)st.no_overshoot.kp, (double)st.no_overshoot.ki,
+             (double)st.no_overshoot.kd);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static esp_err_t pid_autotune_post_handler(httpd_req_t *req)
+{
+    char body[192];
+    int received = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    char param[16];
+    if (httpd_query_key_value(body, "abort", param, sizeof(param)) == ESP_OK) {
+        pid_autotune_abort("Aborted by operator");
+        return pid_autotune_get_handler(req);
+    }
+
+    float setpoint_c = -1.0f;
+    parse_float_field(body, "setpoint_c", &setpoint_c);
+    long high = 70;
+    long low = 0;
+    if (httpd_query_key_value(body, "output_positive_pct", param, sizeof(param)) == ESP_OK) {
+        high = strtol(param, NULL, 10);
+    }
+    if (httpd_query_key_value(body, "output_negative_pct", param, sizeof(param)) == ESP_OK) {
+        low = strtol(param, NULL, 10);
+    }
+    if (setpoint_c <= 0.0f || high < 1 || high > 100 || low < 0 || low >= high) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad setpoint or relay outputs");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = pid_autotune_start(setpoint_c, (uint8_t)high, (uint8_t)low);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+    return pid_autotune_get_handler(req);
+}
+
 esp_err_t diagnostics_routes_register(httpd_handle_t server)
 {
     httpd_uri_t uri = { .uri = "/diagnostics", .method = HTTP_GET, .handler = diagnostics_get_handler };
@@ -471,6 +650,18 @@ esp_err_t diagnostics_routes_register(httpd_handle_t server)
         return err;
     }
 
-    ESP_LOGI(TAG, "Diagnostics routes registered (/diagnostics, /api/pid_log/*, /api/pid_tuning)");
+    httpd_uri_t autotune_get_uri = { .uri = "/api/pid_autotune", .method = HTTP_GET, .handler = pid_autotune_get_handler };
+    err = httpd_register_uri_handler(server, &autotune_get_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t autotune_post_uri = { .uri = "/api/pid_autotune", .method = HTTP_POST, .handler = pid_autotune_post_handler };
+    err = httpd_register_uri_handler(server, &autotune_post_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Diagnostics routes registered (/diagnostics, /api/pid_log/*, /api/pid_tuning, /api/pid_autotune)");
     return ESP_OK;
 }

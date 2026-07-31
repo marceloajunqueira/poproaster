@@ -6,10 +6,10 @@
  * Per the project constitution (Principle I, Safety-First): no component
  * other than this one may command the heater above 0% duty. All hard-fail
  * rules from research.md Decision 4 live here:
- *   1. Heater requires fan >= FAN_MIN_PCT_DURING_HEAT (60%, fixed - this is
+ *   1. Heater requires fan >= FAN_MIN_PCT_DURING_HEAT (80%, fixed - this is
  *      the fan's own physical minimum operating duty / Level 1, see
  *      hal/fan_pwm.h).
- *   2. Absolute temperature cutoff at 260C (warning at 240C).
+ *   2. Absolute temperature cutoff at 240C (warning at 230C).
  *   3. Sensor failure -> heater forced off + critical alarm.
  *   4. Indirect fan-failure (via RoR, see fan_failure_detector.c) -> heater
  *      off + critical alarm (reported into this module by that detector).
@@ -35,9 +35,9 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-#define SAFETY_FAN_MIN_PCT_DURING_HEAT   60    /* Fixed: fan's own physical minimum operating duty / Level 1 (hal/fan_pwm.h) - not configurable. */
-#define SAFETY_TEMP_WARNING_C            240.0f /* FR-026 */
-#define SAFETY_TEMP_ABSOLUTE_CUTOFF_C    260.0f /* FR-026 */
+#define SAFETY_FAN_MIN_PCT_DURING_HEAT   80    /* Fixed: fan's own physical minimum operating duty / Level 1 (hal/fan_pwm.h) - not configurable. */
+#define SAFETY_TEMP_WARNING_C            230.0f /* FR-026 */
+#define SAFETY_TEMP_ABSOLUTE_CUTOFF_C    240.0f /* FR-026 */
 #define SAFETY_DEFAULT_MAX_DURATION_MS   (25 * 60 * 1000) /* FR-033 default 25 min. */
 #define SAFETY_FAN_STOP_MIN_TEMP_C       100.0f /* Fan may only be commanded fully OFF (0%) once BT is below this - since roast profiles can now configure their own Cooling segment/duration, this stops a badly-configured (or cancelled-early) profile from cutting airflow while the heating element/chamber is still hot. Bypassed entirely by Emergency Stop. */
 #define SAFETY_MAX_HEATER_POWER_DEFAULT_PCT 100 /* Default scale: 100% = no extra power reduction. */
@@ -101,7 +101,7 @@ uint8_t safety_manager_get_max_heater_power_pct(void);
  */
 uint8_t safety_manager_get_last_requested_heater_pct(void);
 
-/** Feeds the latest validated temperature sample; drives the 260C/240C cutoff and sensor-failure checks. */
+/** Feeds the latest validated temperature sample; drives the 240C/230C cutoff and sensor-failure checks. */
 void safety_manager_on_temperature_sample(float bean_temp_c, bool sensor_valid);
 
 /** Called by fan_failure_detector.c (FR-030) when an anomalous RoR pattern is detected during heating. */

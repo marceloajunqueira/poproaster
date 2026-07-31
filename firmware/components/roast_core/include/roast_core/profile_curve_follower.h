@@ -40,6 +40,25 @@
 extern "C" {
 #endif
 
+/* Manual mode "Target Temp" operating range - operator testing showed
+ * setpoints above this melt the roaster's plastic housing, so this is the
+ * hard ceiling for any manual target (see the clamp in
+ * profile_curve_follower_set_manual_target_temp_c()), not just the
+ * on-device slider's display range. 0 (heater off) is always still
+ * reachable below this floor - it's a sentinel to turn the heater off
+ * (Desligar button, or a stale/negative web request), not a real operating
+ * temperature. */
+#define MANUAL_TARGET_TEMP_MIN_C_INT 120
+#define MANUAL_TARGET_TEMP_MAX_C_INT 220
+#define MANUAL_TARGET_TEMP_MIN_C ((float)MANUAL_TARGET_TEMP_MIN_C_INT)
+#define MANUAL_TARGET_TEMP_MAX_C ((float)MANUAL_TARGET_TEMP_MAX_C_INT)
+
+#define PCF_STRINGIFY_(x) #x
+#define PCF_STRINGIFY(x) PCF_STRINGIFY_(x)
+/** Same bounds as plain string literals, for building HTML attributes (see dashboard_routes.c). */
+#define MANUAL_TARGET_TEMP_MIN_C_STR PCF_STRINGIFY(MANUAL_TARGET_TEMP_MIN_C_INT)
+#define MANUAL_TARGET_TEMP_MAX_C_STR PCF_STRINGIFY(MANUAL_TARGET_TEMP_MAX_C_INT)
+
 /** Starts the background control-loop timer (1s period). Call once at boot, after command_dispatcher_init()/roast_telemetry_service_init(). */
 esp_err_t profile_curve_follower_init(void);
 

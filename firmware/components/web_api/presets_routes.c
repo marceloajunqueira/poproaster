@@ -9,6 +9,7 @@
 #include "esp_log.h"
 
 #include "hal/fan_pwm.h"
+#include "roast_core/profile_curve_follower.h"
 #include "web_api/presets_routes.h"
 #include "web_api/dashboard_routes.h"
 #include "storage/profile_store.h"
@@ -248,7 +249,7 @@ static esp_err_t presets_edit_get_handler(httpd_req_t *req)
         profile.point_count = 1;
         profile.points[0].duration_s = 60;
         profile.points[0].target_temp_c = 200.0f;
-        profile.points[0].target_fan_pct = 60;
+        profile.points[0].target_fan_pct = ROAST_PROFILE_FAN_MIN_PCT;
         profile.points[0].is_cooling = false;
     } else if (profile_store_load(id, &profile) != ESP_OK) {
         httpd_resp_set_status(req, "303 See Other");
@@ -398,11 +399,11 @@ static esp_err_t presets_save_post_handler(httpd_req_t *req)
         if (temp < 0.0f) {
             temp = 0.0f;
         }
-        if (temp > 260.0f) {
-            temp = 260.0f;
+        if (temp > MANUAL_TARGET_TEMP_MAX_C) {
+            temp = MANUAL_TARGET_TEMP_MAX_C;
         }
 
-        int fan = 60;
+        int fan = ROAST_PROFILE_FAN_MIN_PCT;
         snprintf(key, sizeof(key), "fan%d", i);
         if (httpd_query_key_value(body, key, val, sizeof(val)) == ESP_OK) {
             fan = atoi(val);
@@ -430,7 +431,7 @@ static esp_err_t presets_save_post_handler(httpd_req_t *req)
             pt->target_temp_c = ROAST_PROFILE_COOLING_TEMP_C;
             pt->target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT;
         } else {
-            /* Fan is quantized to 5 discrete levels (60/70/80/90/100%, see
+            /* Fan is quantized to 3 discrete levels (80/90/100%, see
              * hal/fan_pwm.h) - snap whatever the client sent to the nearest
              * one, never below Level 1, same rule as the display editor. */
             uint8_t fan_level = fan_pwm_pct_to_level((uint8_t)(fan > 255 ? 255 : fan));
@@ -591,7 +592,7 @@ static esp_err_t presets_import_post_handler(httpd_req_t *req)
 
         unsigned long dur = 60;
         float temp = 200.0f;
-        unsigned fan = 60;
+        unsigned fan = ROAST_PROFILE_FAN_MIN_PCT;
         int cooling = 0;
         if (sscanf(bracket, "[%lu,%f,%u,%d]", &dur, &temp, &fan, &cooling) != 4) {
             break;
@@ -604,8 +605,8 @@ static esp_err_t presets_import_post_handler(httpd_req_t *req)
             pt->target_temp_c = ROAST_PROFILE_COOLING_TEMP_C;
             pt->target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT;
         } else {
-            pt->target_temp_c = (temp < 0.0f) ? 0.0f : (temp > 260.0f ? 260.0f : temp);
-            /* Fan is quantized to 5 discrete levels (60/70/80/90/100%, see
+            pt->target_temp_c = (temp < 0.0f) ? 0.0f : (temp > MANUAL_TARGET_TEMP_MAX_C ? MANUAL_TARGET_TEMP_MAX_C : temp);
+            /* Fan is quantized to 3 discrete levels (80/90/100%, see
              * hal/fan_pwm.h) - snap the imported value to the nearest one,
              * never below Level 1. */
             uint8_t fan_level = fan_pwm_pct_to_level((uint8_t)(fan > 255 ? 255 : fan));

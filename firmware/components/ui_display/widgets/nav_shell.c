@@ -222,7 +222,7 @@ static const char *alarm_text(safety_alarm_type_t alarm)
 {
     switch (alarm) {
     case SAFETY_ALARM_TEMP_ABSOLUTE_CUTOFF:
-        return LV_SYMBOL_WARNING " TEMP CUTOFF: bean temp reached 260C, heater OFF";
+        return LV_SYMBOL_WARNING " TEMP CUTOFF: bean temp reached 240C, heater OFF";
     case SAFETY_ALARM_SENSOR_FAILURE:
         return LV_SYMBOL_WARNING " SENSOR FAILURE: invalid temperature reading, heater OFF";
     case SAFETY_ALARM_FAN_FAILURE_INDIRECT:

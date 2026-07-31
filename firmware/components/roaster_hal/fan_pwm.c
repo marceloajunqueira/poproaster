@@ -16,8 +16,16 @@ static const char *TAG = "fan_pwm";
  * discrete speeds, not arbitrary percentages - 0=off, 1..5 map to these
  * fixed duty values. This is a hardware/motor characteristic, independent
  * of (and lower-bounds) the Safety Manager's own
- * SAFETY_FAN_MIN_PCT_DURING_HEAT floor. */
-static const uint8_t FAN_LEVEL_PCT[FAN_PWM_LEVEL_COUNT] = {0, 60, 70, 80, 90, 100};
+ * SAFETY_FAN_MIN_PCT_DURING_HEAT floor.
+ *
+ * The band is deliberately narrow and high (80-100, not the old 60-100):
+ * a ~100g charge of green, still-wet beans needs near-full airflow to
+ * fluidize at all, so the old levels 1-2 (60/70%) were unusable in
+ * practice. Keeping every level strong also halves the step size to 5
+ * points, and airflow IS this plant's dominant gain term - measured, the
+ * same heater duty settles ~140C at 100% fan but runs away past 194C at
+ * 90%, so every fan step is a large thermal disturbance to the PID. */
+static const uint8_t FAN_LEVEL_PCT[FAN_PWM_LEVEL_COUNT] = {FAN_PWM_LEVEL_PCT_LIST};
 
 /* Operator report: the fan turning on instantly (0 -> target duty) pulls
  * enough inrush current to stress the power supply - ramp up smoothly over
@@ -100,7 +108,7 @@ esp_err_t fan_pwm_init(void)
 
     s_fan_target_pct = 0;
     s_fan_ramping = false;
-    ESP_LOGI(TAG, "Fan PWM init OK (GPIO=%d, timer=%d, channel=%d, freq=%dHz, levels=0/60/70/80/90/100%%, soft-start=%dms)",
+    ESP_LOGI(TAG, "Fan PWM init OK (GPIO=%d, timer=%d, channel=%d, freq=%dHz, levels=0/80/90/100%%, soft-start=%dms)",
              BOARD_PERIPH_FAN_PWM_GPIO, BOARD_PERIPH_FAN_PWM_LEDC_TIMER,
              BOARD_PERIPH_FAN_PWM_LEDC_CHANNEL, BOARD_PERIPH_FAN_PWM_FREQ_HZ,
              FAN_SOFT_START_MS);
@@ -115,7 +123,7 @@ esp_err_t fan_pwm_set_pct(uint8_t pct)
     if (pct > 0) {
         /* Snap to the nearest discrete level; a deliberate nonzero request
          * must never round down to "off" (level 0), so it's floored at the
-         * lowest nonzero level (60%) instead. */
+         * lowest nonzero level (80%) instead. */
         uint8_t level = fan_pwm_pct_to_level(pct);
         if (level < 1) {
             level = 1;

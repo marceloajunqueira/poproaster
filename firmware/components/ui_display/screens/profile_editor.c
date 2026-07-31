@@ -7,6 +7,7 @@
 #include "esp_log.h"
 
 #include "hal/fan_pwm.h"
+#include "roast_core/profile_curve_follower.h"
 #include "storage/profile_store.h"
 #include "ui_display/screens/profile_editor.h"
 #include "ui_display/screens/profile_list.h"
@@ -14,9 +15,9 @@
 static const char *TAG = "profile_editor";
 
 /* Duration steps in whole 15s increments, clamped to a sane [15s, 30min]
- * per-segment range; temp steps by 5C. Fan is quantized to 5 discrete
- * levels (60/70/80/90/100%, see hal/fan_pwm.h) - the stepper below moves
- * one LEVEL at a time (1-5, never 0 - a non-Cooling segment always needs
+ * per-segment range; temp steps by 5C. Fan is quantized to 3 discrete
+ * levels (80/90/100%, see hal/fan_pwm.h) - the stepper below moves
+ * one LEVEL at a time (1-3, never 0 - a non-Cooling segment always needs
  * the fan on), not an arbitrary percentage. */
 #define DURATION_STEP_S 15
 #define DURATION_MIN_S 15
@@ -181,7 +182,7 @@ static void add_segment_cb(lv_event_t *e)
      * the one right before Cooling) as a reasonable starting point for the
      * new one, since cloning the Cooling segment itself would just copy
      * its fixed 0C/100% values into a new "heating" segment. */
-    roast_profile_point_t new_pt = { .duration_s = 60, .target_temp_c = 200.0f, .target_fan_pct = 60, .is_cooling = false };
+    roast_profile_point_t new_pt = { .duration_s = 60, .target_temp_c = 200.0f, .target_fan_pct = 80, .is_cooling = false };
     if (s_working.point_count >= 2) {
         new_pt = s_working.points[s_working.point_count - 2];
         new_pt.is_cooling = false;
@@ -233,12 +234,15 @@ static void stepper_event_cb(lv_event_t *e)
     case FIELD_TEMP: {
         float v = pt->target_temp_c + (float)act->delta;
         if (v < 0.0f) v = 0.0f;
-        if (v > 260.0f) v = 260.0f;
+        /* Operator testing showed setpoints above this melt the plastic
+         * housing - see MANUAL_TARGET_TEMP_MAX_C (profile_curve_follower.h),
+         * same ceiling as the Manual screen's Target Temp slider. */
+        if (v > MANUAL_TARGET_TEMP_MAX_C) v = MANUAL_TARGET_TEMP_MAX_C;
         pt->target_temp_c = v;
         break;
     }
     case FIELD_FAN: {
-        /* Fan is quantized to 5 discrete levels (60/70/80/90/100%) - step
+        /* Fan is quantized to 3 discrete levels (80/90/100%) - step
          * by whole levels (delta is -1/+1 here, not a raw percentage), and
          * never below Level 1 (non-Cooling segments always need the fan
          * on). Cooling segments never reach this stepper at all (its fan
@@ -430,7 +434,7 @@ static void build_segment_card(lv_obj_t *parent, uint8_t idx, lv_coord_t width)
          * (non-editable) reference text instead of steppers. */
         lv_obj_t *fixed_lbl = lv_label_create(row_b);
         lv_obj_add_style(fixed_lbl, &s_style_stat_label, LV_PART_MAIN);
-        lv_label_set_text(fixed_lbl, "Fixed: 0C, Fan L5 (100%)");
+        lv_label_set_text(fixed_lbl, "Fixed: 0C, Fan L3 (100%)");
     } else {
         snprintf(buf, sizeof(buf), "%.0fC", pt->target_temp_c);
         make_stepper(row_b, buf, idx, FIELD_TEMP, -(int16_t)TEMP_STEP_C, (int16_t)TEMP_STEP_C);

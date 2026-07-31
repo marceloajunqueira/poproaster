@@ -53,32 +53,35 @@ static void seed_demo_profiles(void)
 {
     profile_index_t idx = {0};
 
+    /* Fan curves descend one level at a time: a wet ~100g green charge needs
+     * full airflow to fluidize, and can be eased off as the beans dry and
+     * lighten (less motor strain and noise). */
     roast_profile_t light = {0};
     strncpy(light.name, "Light Roast", sizeof(light.name) - 1);
     light.point_count = 5;
-    light.points[0] = (roast_profile_point_t){ .duration_s = 60,  .target_temp_c = 100.0f, .target_fan_pct = 80 };
-    light.points[1] = (roast_profile_point_t){ .duration_s = 180, .target_temp_c = 160.0f, .target_fan_pct = 60 };
-    light.points[2] = (roast_profile_point_t){ .duration_s = 240, .target_temp_c = 195.0f, .target_fan_pct = 50 };
-    light.points[3] = (roast_profile_point_t){ .duration_s = 60,  .target_temp_c = 200.0f, .target_fan_pct = 40 };
+    light.points[0] = (roast_profile_point_t){ .duration_s = 60,  .target_temp_c = 100.0f, .target_fan_pct = 100 };
+    light.points[1] = (roast_profile_point_t){ .duration_s = 180, .target_temp_c = 160.0f, .target_fan_pct = 90 };
+    light.points[2] = (roast_profile_point_t){ .duration_s = 240, .target_temp_c = 195.0f, .target_fan_pct = 90 };
+    light.points[3] = (roast_profile_point_t){ .duration_s = 60,  .target_temp_c = 200.0f, .target_fan_pct = 80 };
     light.points[4] = (roast_profile_point_t){ .duration_s = 240, .target_temp_c = ROAST_PROFILE_COOLING_TEMP_C, .target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT, .is_cooling = true };
 
     roast_profile_t city = {0};
     strncpy(city.name, "City Roast", sizeof(city.name) - 1);
     city.point_count = 5;
-    city.points[0] = (roast_profile_point_t){ .duration_s = 60,  .target_temp_c = 100.0f, .target_fan_pct = 80 };
-    city.points[1] = (roast_profile_point_t){ .duration_s = 210, .target_temp_c = 165.0f, .target_fan_pct = 60 };
-    city.points[2] = (roast_profile_point_t){ .duration_s = 270, .target_temp_c = 205.0f, .target_fan_pct = 45 };
-    city.points[3] = (roast_profile_point_t){ .duration_s = 90,  .target_temp_c = 212.0f, .target_fan_pct = 40 };
+    city.points[0] = (roast_profile_point_t){ .duration_s = 60,  .target_temp_c = 100.0f, .target_fan_pct = 100 };
+    city.points[1] = (roast_profile_point_t){ .duration_s = 210, .target_temp_c = 165.0f, .target_fan_pct = 90 };
+    city.points[2] = (roast_profile_point_t){ .duration_s = 270, .target_temp_c = 205.0f, .target_fan_pct = 90 };
+    city.points[3] = (roast_profile_point_t){ .duration_s = 90,  .target_temp_c = 212.0f, .target_fan_pct = 80 };
     city.points[4] = (roast_profile_point_t){ .duration_s = 240, .target_temp_c = ROAST_PROFILE_COOLING_TEMP_C, .target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT, .is_cooling = true };
 
     roast_profile_t full_city_plus = {0};
     strncpy(full_city_plus.name, "Full City+", sizeof(full_city_plus.name) - 1);
     full_city_plus.point_count = 6;
-    full_city_plus.points[0] = (roast_profile_point_t){ .duration_s = 60,  .target_temp_c = 100.0f, .target_fan_pct = 80 };
-    full_city_plus.points[1] = (roast_profile_point_t){ .duration_s = 210, .target_temp_c = 165.0f, .target_fan_pct = 60 };
-    full_city_plus.points[2] = (roast_profile_point_t){ .duration_s = 270, .target_temp_c = 208.0f, .target_fan_pct = 45 };
-    full_city_plus.points[3] = (roast_profile_point_t){ .duration_s = 90,  .target_temp_c = 218.0f, .target_fan_pct = 35 };
-    full_city_plus.points[4] = (roast_profile_point_t){ .duration_s = 30,  .target_temp_c = 221.0f, .target_fan_pct = 35 };
+    full_city_plus.points[0] = (roast_profile_point_t){ .duration_s = 60,  .target_temp_c = 100.0f, .target_fan_pct = 100 };
+    full_city_plus.points[1] = (roast_profile_point_t){ .duration_s = 210, .target_temp_c = 165.0f, .target_fan_pct = 90 };
+    full_city_plus.points[2] = (roast_profile_point_t){ .duration_s = 270, .target_temp_c = 208.0f, .target_fan_pct = 90 };
+    full_city_plus.points[3] = (roast_profile_point_t){ .duration_s = 90,  .target_temp_c = 218.0f, .target_fan_pct = 80 };
+    full_city_plus.points[4] = (roast_profile_point_t){ .duration_s = 30,  .target_temp_c = 221.0f, .target_fan_pct = 80 };
     full_city_plus.points[5] = (roast_profile_point_t){ .duration_s = 240, .target_temp_c = ROAST_PROFILE_COOLING_TEMP_C, .target_fan_pct = ROAST_PROFILE_COOLING_FAN_PCT, .is_cooling = true };
 
     const roast_profile_t *demo_profiles[] = { &light, &city, &full_city_plus };
@@ -161,6 +164,18 @@ esp_err_t profile_store_load(int id, roast_profile_t *out)
         ESP_LOGW(TAG, "profile_store_load(id=%d): point_count %d exceeds max %d - clamping",
                  id, out->point_count, ROAST_PROFILE_MAX_POINTS);
         out->point_count = ROAST_PROFILE_MAX_POINTS;
+    }
+
+    /* Profiles saved under an older, wider fan level table can hold targets
+     * below today's floor; left alone the Safety Manager would reject those
+     * fan commands outright while the heater runs, silently stranding the
+     * fan at its previous speed. Raise them to Level 1 instead. */
+    for (uint8_t i = 0; i < out->point_count; i++) {
+        if (!out->points[i].is_cooling && out->points[i].target_fan_pct < ROAST_PROFILE_FAN_MIN_PCT) {
+            ESP_LOGW(TAG, "profile_store_load(id=%d): segment %u fan %u%% below floor - raising to %u%%",
+                     id, i, out->points[i].target_fan_pct, ROAST_PROFILE_FAN_MIN_PCT);
+            out->points[i].target_fan_pct = ROAST_PROFILE_FAN_MIN_PCT;
+        }
     }
     return ESP_OK;
 }

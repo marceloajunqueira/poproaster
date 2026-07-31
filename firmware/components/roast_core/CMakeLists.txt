@@ -11,6 +11,7 @@ idf_component_register(
         "heater_pid.c"
         "roast_events.c"
         "pid_debug_log.c"
+        "pid_autotune.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

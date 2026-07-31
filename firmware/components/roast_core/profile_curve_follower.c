@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 
 #include "roast_core/session_state_machine.h"
@@ -13,6 +14,7 @@
 #include "roast_core/roast_profile.h"
 #include "roast_core/roast_events.h"
 #include "roast_core/heater_pid.h"
+#include "roast_core/pid_autotune.h"
 #include "roast_core/pid_debug_log.h"
 #include "storage/profile_store.h"
 #include "hal/fan_pwm.h"
@@ -286,9 +288,104 @@ static void drive_step_test(void)
                           fan_pwm_get_pct());
 }
 
+/** Relay-feedback autotune: bypasses the PID and lets pid_autotune.c drive
+ * the duty directly, logged under mode="AUTOTUNE". */
+static bool s_autotune_result_applied;
+static bool s_autotune_fan_release_attempted;
+
+static void drive_autotune(void)
+{
+    roast_telemetry_snapshot_t snap;
+    roast_telemetry_service_get_snapshot(&snap);
+
+    uint8_t duty = 0;
+    if (snap.sensor_valid) {
+        duty = pid_autotune_update(snap.bean_temp_c);
+    } else {
+        pid_autotune_abort("Sensor reading invalid");
+    }
+
+    command_dispatcher_set_heater_pct(duty, SAFETY_CMD_SOURCE_DISPLAY);
+
+    /* BUG FIX: this MUST be fetched AFTER pid_autotune_update() (which is
+     * what actually transitions RUNNING -> SUCCEEDED/FAILED internally,
+     * synchronously, on whichever tick the run finishes), not before -
+     * fetching it before update() meant this always saw the STALE
+     * (still-RUNNING) state, so the SUCCEEDED branch below could never
+     * fire: by the next tick, pid_autotune_is_active() (checked by
+     * follower_timer_cb before it will call this function again) already
+     * reports false, so drive_autotune() never even runs again to see the
+     * new state. The result: the "auto-apply+save to NVS on success"
+     * feature never actually triggered. */
+    pid_autotune_status_t st;
+    pid_autotune_get_status(&st);
+
+    /* Fully automatic per operator request: apply+persist the instant the
+     * run converges, regardless of whether any UI (on-device screen or the
+     * web Diagnostics page) happens to be open to see it. "No overshoot" is
+     * the deliberately conservative pick of the three Ziegler-Nichols rule
+     * sets pid_autotune.c computes - Ziegler-Nichols classic is known to
+     * leave ~25% overshoot, right where this machine's thermal protector
+     * tends to trip. */
+    if (st.state == PID_AUTOTUNE_SUCCEEDED && !s_autotune_result_applied) {
+        esp_err_t err = pid_autotune_apply_result(&st.no_overshoot, true);
+        s_autotune_result_applied = true;
+        ESP_LOGI(TAG, "Autotune converged - applied+saved No-Overshoot gains (kp=%.3f ki=%.4f kd=%.2f): %s",
+                 (double)st.no_overshoot.kp, (double)st.no_overshoot.ki, (double)st.no_overshoot.kd,
+                 esp_err_to_name(err));
+    } else if (st.state == PID_AUTOTUNE_RUNNING) {
+        s_autotune_result_applied = false; /* Reset so the next run's success also gets applied. */
+    }
+
+    /* Bug report: "cancelei e o fan continuou ligado" - raising the fan to
+     * full speed to run the relay test is this subsystem's own side effect
+     * (pid_autotune_screen.c / diagnostics_routes.c), so the instant a run
+     * STOPS for any reason (converged, self-aborted, or an operator
+     * Cancel), try ONCE to hand the fan back - covers every stop path in
+     * one place, not just whichever UI's own Cancel button happened to be
+     * used. Rejected (fan stays on) while BT is still >= 100C, same
+     * anti-scorch floor as everywhere else in the firmware - that's
+     * expected, not a bug; the operator still has full manual control of
+     * the fan afterward regardless. */
+    if (st.state != PID_AUTOTUNE_RUNNING && st.state != PID_AUTOTUNE_IDLE && !s_autotune_fan_release_attempted) {
+        s_autotune_fan_release_attempted = true;
+        esp_err_t fan_err = command_dispatcher_set_fan_pct(0, SAFETY_CMD_SOURCE_DISPLAY);
+        ESP_LOGI(TAG, "Autotune stopped - fan release attempt: %s", esp_err_to_name(fan_err));
+    } else if (st.state == PID_AUTOTUNE_RUNNING) {
+        s_autotune_fan_release_attempted = false; /* Reset so the next run's stop also tries this. */
+    }
+
+    pid_debug_log_record("AUTOTUNE", ROAST_PHASE_IDLE, st.elapsed_s, st.setpoint_c,
+                          snap.sensor_valid ? snap.bean_temp_c : 0.0f, snap.sensor_valid, duty,
+                          ssr_heater_get_duty_pct(), fan_pwm_get_target_pct(), fan_pwm_get_pct());
+}
+
 static void follower_timer_cb(void *arg)
 {
     (void)arg;
+
+    /* Every esp_timer callback in the whole firmware - this one, the SSR
+     * PWM window, and the safety manager's own 240C absolute-cutoff check -
+     * runs on the SAME single shared esp_timer task. A hang anywhere in
+     * THIS control loop would silently freeze the SSR GPIO at its last
+     * state AND stop the safety cutoff from ever being checked again, with
+     * nothing left to catch it once the physical thermal protector is
+     * removed (2026-07-31). Subscribing this task to the Task Watchdog and
+     * resetting it every tick means a genuine hang reboots the board
+     * (CONFIG_ESP_TASK_WDT_PANIC, sdkconfig.defaults) instead of hanging
+     * forever - safe, since GPIOs default OFF at boot. */
+    static bool s_wdt_subscribed;
+    if (!s_wdt_subscribed) {
+        s_wdt_subscribed = (esp_task_wdt_add(NULL) == ESP_OK);
+    }
+    if (s_wdt_subscribed) {
+        esp_task_wdt_reset();
+    }
+
+    if (pid_autotune_is_active()) {
+        drive_autotune();
+        return; /* Supersedes Manual/Profile PID control entirely while active. */
+    }
 
     if (s_step_test_heater_pct >= 0) {
         drive_step_test();
@@ -527,20 +624,22 @@ void profile_curve_follower_set_manual_target_temp_c(float target_c)
      * web API (`POST /api/control action=set_target_temp&value=N`,
      * dashboard_routes.c) as a raw atoi()'d integer with NO validation at
      * that layer - unlike the on-device Manual screen, which already
-     * bounds its slider to 0..260. Without a clamp here, a bogus/malicious
-     * request (or a client-side bug) could set an absurd target (e.g.
-     * hugely negative or in the tens of thousands); a very negative value
-     * is harmless (the PID's hard-overshoot cutoff forces the heater off
-     * immediately), but a very large positive value would have the PID
-     * legitimately try to drive the heater at 100% indefinitely with
-     * nothing but the last-resort 260C absolute safety cutoff
-     * (safety_manager.c) ever stopping it - far more aggressive than any
-     * real profile/operator intent. Clamp to the same 0..260C range the
-     * display's own Target Temp slider already enforces. */
+     * bounds its slider to MANUAL_TARGET_TEMP_MIN_C..MAX_C. Without a
+     * clamp here, a bogus/malicious request (or a client-side bug) could
+     * set an absurd target (e.g. hugely negative or in the tens of
+     * thousands); a very negative value is harmless (the PID's hard-
+     * overshoot cutoff forces the heater off immediately), but a very
+     * large positive value would have the PID legitimately try to drive
+     * the heater at 100% indefinitely with nothing but the last-resort
+     * 240C absolute safety cutoff (safety_manager.c) ever stopping it -
+     * far more aggressive than any real profile/operator intent, and well
+     * past the point operator testing showed the plastic housing melts.
+     * Clamp to the same range the display's own Target Temp slider
+     * enforces (0 is still allowed through as the "off" sentinel). */
     if (target_c < 0.0f) {
         target_c = 0.0f;
-    } else if (target_c > SAFETY_TEMP_ABSOLUTE_CUTOFF_C) {
-        target_c = SAFETY_TEMP_ABSOLUTE_CUTOFF_C;
+    } else if (target_c > MANUAL_TARGET_TEMP_MAX_C) {
+        target_c = MANUAL_TARGET_TEMP_MAX_C;
     }
     s_manual_target_temp_c = target_c;
 }

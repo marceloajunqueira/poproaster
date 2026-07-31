@@ -165,7 +165,7 @@ static const char *phase_str(roast_phase_t phase)
 static const char *alarm_str(safety_alarm_type_t alarm)
 {
     switch (alarm) {
-    case SAFETY_ALARM_TEMP_ABSOLUTE_CUTOFF: return "TEMP CUTOFF: bean temp reached 260C, heater OFF";
+    case SAFETY_ALARM_TEMP_ABSOLUTE_CUTOFF: return "TEMP CUTOFF: bean temp reached 240C, heater OFF";
     case SAFETY_ALARM_SENSOR_FAILURE: return "SENSOR FAILURE: invalid temperature reading, heater OFF";
     case SAFETY_ALARM_FAN_FAILURE_INDIRECT: return "FAN FAILURE: abnormal heating pattern detected, heater OFF";
     case SAFETY_ALARM_DURATION_WATCHDOG: return "MAX DURATION REACHED: auto-cooling forced";
@@ -693,10 +693,10 @@ static const char *DASHBOARD_SCRIPT =
     "document.getElementById('switchManualBtn').addEventListener('click',function(){"
     "if(confirm('Switch to Manual/Artisan mode? This cannot be undone for this roast.'))post('switch_manual',1);});"
     /* Fan override: matches the display's Manual Control screen model -
-     * the fan only has 5 usable discrete speeds (0=off, 1-5=60/70/80/90/100%),
+     * the fan only has 3 usable discrete speeds (0=off, 1-3=80/90/100%),
      * applied immediately on release (no separate Apply step, same as the
      * on-device +/-/Parar buttons). */
-    "var FAN_LEVEL_PCT=[0,60,70,80,90,100];"
+    "var FAN_LEVEL_PCT=" FAN_PWM_LEVEL_PCT_JSON ";"
     "var fanSlider=document.getElementById('fanSlider');"
     "fanSlider.addEventListener('input',function(){"
     "var l=parseInt(this.value,10);setText('fanSliderVal','Level '+l+' ('+FAN_LEVEL_PCT[l]+'%)');});"
@@ -711,8 +711,12 @@ static const char *DASHBOARD_SCRIPT =
     "targetSlider.addEventListener('input',function(){setText('targetSliderVal',this.value+' C (tap Apply)');});"
     "document.getElementById('targetApplyBtn').addEventListener('click',function(){"
     "post('set_target_temp',targetSlider.value);setText('targetSliderVal',targetSlider.value+' C');});"
+    /* 0 is the heater-off sentinel, below the slider's own operating range
+     * (MANUAL_TARGET_TEMP_MIN_C..MAX_C) - don't force the slider to a value
+     * it can't actually reach, just leave its position alone and show the
+     * off state in the label text instead. */
     "document.getElementById('targetOffBtn').addEventListener('click',function(){"
-    "targetSlider.value=0;setText('targetSliderVal','0 C');post('set_target_temp',0);});"
+    "setText('targetSliderVal','0 C (off)');post('set_target_temp',0);});"
     "window.addEventListener('resize',draw);"
     "})();"
     "</script>";
@@ -753,9 +757,9 @@ void dashboard_routes_send_page(httpd_req_t *req)
                            "<div class='stat'><div class='label'>Fan / Heater</div><div class='value'><span id='fan'>0%</span> / <span id='heater'>0%</span></div></div>"
                            "</div>"
                            "<div class='sliderrow'><div class='label'><span>Fan override (Level)</span><span id='fanSliderVal'>--</span></div>"
-                           "<input type='range' id='fanSlider' min='0' max='5' step='1' value='0'></div>"
+                           "<input type='range' id='fanSlider' min='0' max='" FAN_PWM_LEVEL_MAX_STR "' step='1' value='0'></div>"
                            "<div class='sliderrow'><div class='label'><span>Target Temp</span><span id='targetSliderVal'>--</span></div>"
-                           "<input type='range' id='targetSlider' min='0' max='260' step='1' value='0'></div>"
+                           "<input type='range' id='targetSlider' min='" MANUAL_TARGET_TEMP_MIN_C_STR "' max='" MANUAL_TARGET_TEMP_MAX_C_STR "' step='1' value='" MANUAL_TARGET_TEMP_MIN_C_STR "'></div>"
                            "<div class='btnrow'>"
                            "<button id='targetApplyBtn'>Apply Target Temp</button>"
                            "<button id='targetOffBtn' class='danger'>Turn Off Heater</button>"

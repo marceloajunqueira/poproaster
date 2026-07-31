@@ -15,7 +15,7 @@
 
 static const char *TAG = "manual_control";
 
-#define FAN_BAR_COUNT 5
+#define FAN_BAR_COUNT 3
 
 static lv_obj_t *s_status_label;
 static lv_obj_t *s_fan_label;
@@ -68,7 +68,7 @@ static const char *phase_text(roast_phase_t phase)
 
 /* Per operator request: the fan only has 5 usable discrete speeds (the
  * motor doesn't behave predictably at arbitrary percentages) - 0=off,
- * 1..5 map to hal/fan_pwm.h's fixed level table (60/70/80/90/100%). Applied
+ * 1..3 map to hal/fan_pwm.h's fixed level table (80/90/100%). Applied
  * immediately (no separate Apply step needed for discrete +/- taps, unlike
  * the Target Temp slider below). Still routed through command_dispatcher,
  * which enforces the same Safety Manager rules (fan floor, heater-requires-
@@ -117,17 +117,36 @@ static void fan_stop_btn_event_cb(lv_event_t *e)
     apply_fan_level(0);
 }
 
+/* Tapping a level box jumps straight to it, instead of only being able to
+ * step one level at a time via +/-. */
+static void fan_bar_click_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    uint8_t level = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+    apply_fan_level(level);
+}
+
 /* Per operator request: the Target Temp slider no longer applies on
  * release directly - it only stages a PENDING value (guards against
  * accidentally starting the heater toward the wrong temperature from a
- * slip of the finger). The new "Aplicar" button commits it. */
+ * slip of the finger). The new "Aplicar" button commits it. Bound to both
+ * VALUE_CHANGED (fires continuously while dragging, for live feedback -
+ * operator report: with only RELEASED, the label never moved while
+ * dragging so you had to guess the position) and RELEASED (covers the
+ * final position once the finger lifts). */
 static void target_slider_event_cb(lv_event_t *e)
 {
-    if (lv_event_get_code(e) != LV_EVENT_RELEASED) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code != LV_EVENT_VALUE_CHANGED && code != LV_EVENT_RELEASED) {
         return;
     }
     s_target_pending = lv_slider_get_value(lv_event_get_target(e));
     s_target_dirty = true;
+    char buf[48];
+    snprintf(buf, sizeof(buf), "Pending: %d C (tap Aplicar)", (int)s_target_pending);
+    lv_label_set_text(s_target_label, buf);
 }
 
 static void target_apply_btn_event_cb(lv_event_t *e)
@@ -143,7 +162,10 @@ static void target_apply_btn_event_cb(lv_event_t *e)
  * immediately zeroes the Target Temp - no staging/Aplicar needed, since
  * this is meant to interrupt heating right away (heater_pid_update(0, ...)
  * with any BT above a few degrees hits the PID's hard overshoot cutoff on
- * the very next tick, forcing the heater fully off). */
+ * the very next tick, forcing the heater fully off). Doesn't touch the
+ * slider position - 0 is below MANUAL_TARGET_TEMP_MIN_C (it's just the
+ * "off" sentinel, not a real operating point on the dial) so the slider
+ * simply stays wherever it was for whenever the operator turns back on. */
 static void target_off_btn_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
@@ -152,7 +174,6 @@ static void target_off_btn_event_cb(lv_event_t *e)
     s_target_pending = 0;
     s_target_dirty = false;
     profile_curve_follower_set_manual_target_temp_c(0.0f);
-    lv_slider_set_value(s_target_slider, 0, LV_ANIM_OFF);
 }
 
 static void refresh_timer_cb(lv_timer_t *timer)
@@ -184,13 +205,16 @@ static void refresh_timer_cb(lv_timer_t *timer)
 
     /* Target Temp: while a pending (unapplied) change exists, don't let the
      * periodic sync below overwrite it - only resync from the actually-
-     * applied value once "Aplicar" clears the pending flag. */
+     * applied value once "Aplicar" clears the pending flag. Also skip the
+     * resync while target_c is the "off" sentinel (0, below
+     * MANUAL_TARGET_TEMP_MIN_C) - the slider's range no longer reaches
+     * down there, so leave it showing wherever it last was. */
     float target_c = profile_curve_follower_get_manual_target_temp_c();
     if (s_target_dirty) {
         snprintf(buf, sizeof(buf), "Pending: %d C (tap Aplicar)", (int)s_target_pending);
     } else {
         snprintf(buf, sizeof(buf), "Target: %.0f C", (double)target_c);
-        if (!lv_obj_has_state(s_target_slider, LV_STATE_PRESSED)) {
+        if (!lv_obj_has_state(s_target_slider, LV_STATE_PRESSED) && target_c >= MANUAL_TARGET_TEMP_MIN_C) {
             lv_slider_set_value(s_target_slider, (int32_t)target_c, LV_ANIM_OFF);
         }
     }
@@ -244,7 +268,7 @@ static void refresh_timer_cb(lv_timer_t *timer)
         lv_label_set_text(s_control_note_label, "Session paused - heater control is frozen until resumed.");
     } else {
         lv_label_set_text(s_control_note_label,
-                           "Heater is automatic (PID to Target Temp); fan auto-raises to Level 1 (60%) if needed.");
+                           "Heater is automatic (PID to Target Temp); fan auto-raises to Level 1 (80%) if needed.");
     }
 }
 
@@ -278,22 +302,26 @@ void manual_control_show_in(lv_obj_t *parent)
     lv_label_set_text(s_fan_label, "Level 0 (0%)");
     lv_obj_align(s_fan_label, LV_ALIGN_TOP_RIGHT, -margin, 50);
 
-    /* 5 bars, lit up to the current level (like a signal-strength meter) -
-     * lets the operator see fan speed at a glance without doing % math. */
+    /* 3 boxes, lit up to the current level (like a signal-strength meter) -
+     * lets the operator see fan speed at a glance without doing % math.
+     * Also directly clickable to jump to that level. */
     lv_coord_t bar_gap = 6;
+    lv_coord_t bar_h = 22;
     lv_coord_t bar_w = (usable_w - bar_gap * (FAN_BAR_COUNT - 1)) / FAN_BAR_COUNT;
     for (int i = 0; i < FAN_BAR_COUNT; i++) {
         lv_obj_t *bar = lv_obj_create(parent);
         lv_obj_remove_style_all(bar);
-        lv_obj_set_size(bar, bar_w, 16);
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(bar, bar_w, bar_h);
         lv_obj_set_style_bg_color(bar, lv_color_hex(0x333333), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_radius(bar, 3, LV_PART_MAIN);
         lv_obj_align(bar, LV_ALIGN_TOP_LEFT, margin + i * (bar_w + bar_gap), 72);
+        lv_obj_add_event_cb(bar, fan_bar_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(i + 1));
         s_fan_bars[i] = bar;
     }
 
-    lv_coord_t fan_btn_y = 92;
+    lv_coord_t fan_btn_y = 72 + bar_h + 4;
     lv_obj_t *fan_minus_btn = lv_btn_create(parent);
     lv_obj_set_size(fan_minus_btn, 48, 28);
     lv_obj_align(fan_minus_btn, LV_ALIGN_TOP_LEFT, margin, fan_btn_y);
@@ -322,22 +350,27 @@ void manual_control_show_in(lv_obj_t *parent)
     lv_obj_t *target_hdr = lv_label_create(parent);
     lv_obj_add_style(target_hdr, &s_style_value, LV_PART_MAIN);
     lv_label_set_text(target_hdr, "Target Temp");
-    lv_obj_align(target_hdr, LV_ALIGN_TOP_LEFT, margin, 128);
+    lv_obj_align(target_hdr, LV_ALIGN_TOP_LEFT, margin, 134);
 
     s_target_label = lv_label_create(parent);
     lv_obj_add_style(s_target_label, &s_style_label, LV_PART_MAIN);
     lv_label_set_text(s_target_label, "Target: 0 C");
-    lv_obj_align(s_target_label, LV_ALIGN_TOP_RIGHT, -margin, 128);
+    lv_obj_align(s_target_label, LV_ALIGN_TOP_RIGHT, -margin, 134);
 
     s_target_slider = lv_slider_create(parent);
     lv_obj_set_size(s_target_slider, usable_w, 20);
-    lv_obj_align(s_target_slider, LV_ALIGN_TOP_LEFT, margin, 150);
-    lv_slider_set_range(s_target_slider, 0, 260);
+    lv_obj_align(s_target_slider, LV_ALIGN_TOP_LEFT, margin, 156);
+    /* Range is MANUAL_TARGET_TEMP_MIN_C..MAX_C, not 0..260 - operator
+     * testing showed the plastic housing melts above 220C, and there's no
+     * reason to dial below 120C for actual roasting (0/off is a separate
+     * sentinel, reached via "Desligar" below, not a dial position). */
+    lv_slider_set_range(s_target_slider, (int32_t)MANUAL_TARGET_TEMP_MIN_C, (int32_t)MANUAL_TARGET_TEMP_MAX_C);
+    lv_obj_add_event_cb(s_target_slider, target_slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(s_target_slider, target_slider_event_cb, LV_EVENT_RELEASED, NULL);
 
     lv_obj_t *target_apply_btn = lv_btn_create(parent);
     lv_obj_set_size(target_apply_btn, 90, 26);
-    lv_obj_align(target_apply_btn, LV_ALIGN_TOP_RIGHT, -margin, 176);
+    lv_obj_align(target_apply_btn, LV_ALIGN_TOP_RIGHT, -margin, 182);
     lv_obj_add_event_cb(target_apply_btn, target_apply_btn_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *target_apply_lbl = lv_label_create(target_apply_btn);
     lv_label_set_text(target_apply_lbl, LV_SYMBOL_OK " Aplicar");
@@ -345,7 +378,7 @@ void manual_control_show_in(lv_obj_t *parent)
 
     lv_obj_t *target_off_btn = lv_btn_create(parent);
     lv_obj_set_size(target_off_btn, 90, 26);
-    lv_obj_align(target_off_btn, LV_ALIGN_TOP_LEFT, margin, 176);
+    lv_obj_align(target_off_btn, LV_ALIGN_TOP_LEFT, margin, 182);
     lv_obj_set_style_bg_color(target_off_btn, lv_color_hex(0xB3261E), LV_PART_MAIN);
     lv_obj_add_event_cb(target_off_btn, target_off_btn_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *target_off_lbl = lv_label_create(target_off_btn);
@@ -355,14 +388,14 @@ void manual_control_show_in(lv_obj_t *parent)
     s_heater_status_label = lv_label_create(parent);
     lv_obj_add_style(s_heater_status_label, &s_style_value, LV_PART_MAIN);
     lv_label_set_text(s_heater_status_label, "Temp: -- / Heater: 0%");
-    lv_obj_align(s_heater_status_label, LV_ALIGN_TOP_LEFT, margin, 206);
+    lv_obj_align(s_heater_status_label, LV_ALIGN_TOP_LEFT, margin, 212);
 
     lv_obj_t *note = lv_label_create(parent);
     lv_obj_add_style(note, &s_style_label, LV_PART_MAIN);
     lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(note, usable_w);
-    lv_label_set_text(note, "Heater is automatic (PID to Target Temp); fan auto-raises to Level 1 (60%) if needed.");
-    lv_obj_align(note, LV_ALIGN_TOP_LEFT, margin, 226);
+    lv_label_set_text(note, "Heater is automatic (PID to Target Temp); fan auto-raises to Level 1 (80%) if needed.");
+    lv_obj_align(note, LV_ALIGN_TOP_LEFT, margin, 232);
     s_control_note_label = note;
 
     if (s_refresh_timer != NULL) {

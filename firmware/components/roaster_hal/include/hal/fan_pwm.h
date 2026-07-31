@@ -11,10 +11,19 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-/** Number of discrete fan levels, including 0 (off): 0,1,2,3,4,5. */
-#define FAN_PWM_LEVEL_COUNT 6
-/** Highest valid discrete fan level (5 = 100%). */
-#define FAN_PWM_LEVEL_MAX 5
+/** Number of discrete fan levels, including 0 (off): 0,1,2,3. */
+#define FAN_PWM_LEVEL_COUNT 4
+/** Highest valid discrete fan level (3 = 100%). */
+#define FAN_PWM_LEVEL_MAX 3
+
+/** The one definition of the level->percent table; see fan_pwm.c for why the band is high and narrow. */
+#define FAN_PWM_LEVEL_PCT_LIST 0, 80, 90, 100
+
+#define FAN_PWM_STRINGIFY_(...) #__VA_ARGS__
+#define FAN_PWM_STRINGIFY(...) FAN_PWM_STRINGIFY_(__VA_ARGS__)
+#define FAN_PWM_LEVEL_MAX_STR FAN_PWM_STRINGIFY(FAN_PWM_LEVEL_MAX)
+/** Same table as a JS/JSON array literal, so web UIs can't drift out of sync with the HAL. */
+#define FAN_PWM_LEVEL_PCT_JSON "[" FAN_PWM_STRINGIFY(FAN_PWM_LEVEL_PCT_LIST) "]"
 
 /** Initializes the LEDC timer/channel driving the fan PWM output. */
 esp_err_t fan_pwm_init(void);
@@ -24,9 +33,9 @@ esp_err_t fan_pwm_init(void);
  *
  * - Operator report: the fan motor only behaves predictably at a handful of
  *   discrete speeds, not arbitrary percentages - any nonzero request is
- *   snapped to the nearest of the 5 fixed levels (60/70/80/90/100%, see
+ *   snapped to the nearest of the 3 fixed levels (80/90/100%, see
  *   fan_pwm_level_to_pct()); a request that would round down to "off" is
- *   instead raised to the lowest nonzero level (60%) - a deliberate nonzero
+ *   instead raised to the lowest nonzero level (80%) - a deliberate nonzero
  *   request must never silently become 0%.
  * - Turning the fan ON from a full stop (0 -> nonzero) ramps smoothly to the
  *   target duty over ~2 seconds (soft start, avoids a hard power-supply

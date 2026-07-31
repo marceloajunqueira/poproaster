@@ -94,6 +94,11 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ui_display_panel_init());
 
+    /* If the GT911 didn't answer above, touch_driver.c is now retrying in
+     * the background - hook it up live if/when it succeeds instead of
+     * requiring a reboot to pick it up. */
+    touch_driver_set_ready_callback(ui_display_panel_attach_touch);
+
     /* Persistent left navigation sidebar (FR-045): register each tab's
      * content renderer before building the shell. Labels include a small
      * icon line (LV_SYMBOL_*) above the text, per the user's request. */
