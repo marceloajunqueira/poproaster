@@ -31,12 +31,14 @@ static const char *TAG = "presets_routes";
  * it's always exactly ONE mandatory trailing segment, rendered separately
  * (see the dedicated "coolDur" input in presets_edit_get_handler()) with
  * only its duration editable. These rows are ONLY ever heating segments. */
+#define SEG_FIELD_OPEN "<span style='display:inline-flex;align-items:center;gap:4px'>"
+#define SEG_FIELD_CLOSE "</span>"
 #define SEG_ROW_TEMPLATE \
-    "<div class='row segrow' style='flex-wrap:wrap;gap:6px'>" \
-    "<input class='sdur' type='number' value='%u' min='15' max='1800' step='15' style='width:70px'>s&nbsp;" \
-    "<input class='stemp' type='number' value='%.1f' min='0' max='260' step='1' style='width:60px'>&#8451;&nbsp;" \
-    "<input class='sfan' type='number' value='%u' min='0' max='100' step='5' style='width:55px'>%%fan&nbsp;" \
-    "<button type='button' onclick='this.parentElement.remove()'>&times;</button>" \
+    "<div class='row segrow' style='flex-wrap:wrap;justify-content:flex-start;gap:14px'>" \
+    SEG_FIELD_OPEN "<input class='sdur' type='number' value='%u' min='30' max='1800' step='30' style='width:70px'>s" SEG_FIELD_CLOSE \
+    SEG_FIELD_OPEN "<input class='stemp' type='number' value='%.1f' min='0' max='260' step='1' style='width:60px'>&#8451;" SEG_FIELD_CLOSE \
+    SEG_FIELD_OPEN "<select class='sfan' style='width:110px'>%s</select>" SEG_FIELD_CLOSE \
+    "<button type='button' onclick='this.parentElement.remove();if(window.updatePreviewChart)updatePreviewChart();'>&times;</button>" \
     "</div>"
 
 /* Vanilla JS (no external CDN, per FR-021) for the preset editor page:
@@ -51,15 +53,16 @@ static const char *TAG = "presets_routes";
     "var rows=document.querySelectorAll('.segrow');" \
     "if(rows.length>=19){alert('Maximum 19 heating segments (plus the mandatory Cooling one).');return;}" \
     "var d=document.createElement('div');" \
-    "d.className='row segrow';d.style.flexWrap='wrap';d.style.gap='6px';" \
-    "d.innerHTML=`<input class='sdur' type='number' value='60' min='15' max='1800' step='15' style='width:70px'>s&nbsp;" \
-    "<input class='stemp' type='number' value='200' min='0' max='260' step='1' style='width:60px'>&#8451;&nbsp;" \
-    "<input class='sfan' type='number' value='60' min='0' max='100' step='5' style='width:55px'>%fan&nbsp;" \
-    "<button type='button' onclick='this.parentElement.remove()'>&times;</button>`;" \
+    "d.className='row segrow';d.style.flexWrap='wrap';d.style.justifyContent='flex-start';d.style.gap='14px';" \
+    "d.innerHTML=\"<span style='display:inline-flex;align-items:center;gap:4px'><input class='sdur' type='number' value='60' min='30' max='1800' step='30' style='width:70px'>s</span>\"+" \
+    "\"<span style='display:inline-flex;align-items:center;gap:4px'><input class='stemp' type='number' value='200' min='0' max='260' step='1' style='width:60px'>&#8451;</span>\"+" \
+    "\"<span style='display:inline-flex;align-items:center;gap:4px'><select class='sfan' style='width:110px'>\"+FAN_OPTIONS_HTML+\"</select></span>\"+" \
+    "\"<button type='button' onclick='this.parentElement.remove();if(window.updatePreviewChart)updatePreviewChart();'>&times;</button>\";" \
     /* Cooling's own row lives OUTSIDE #segList (a separate, fixed section -
      * see presets_edit_get_handler()), so appending to segList's end
      * naturally means "before Cooling" without any special-casing here. */ \
     "document.getElementById('segList').appendChild(d);" \
+    "if(window.updatePreviewChart)updatePreviewChart();" \
     "}" \
     "function savePreset(){" \
     "var rows=document.querySelectorAll('.segrow');" \
@@ -85,6 +88,111 @@ static const char *TAG = "presets_routes";
     ".then(function(){location.href='/presets';});" \
     "}" \
     "</script>"
+
+/* Live-updating canvas preview of the temp/fan curve implied by the CURRENT
+ * (unsaved) form values - lets the operator see the shape of the profile
+ * while still editing, instead of only after Save+re-opening. Reads
+ * .segrow/.sdur/.stemp/.sfan/#coolDur straight from the DOM on every
+ * input/change event (same fields savePreset() itself reads), so it's
+ * always showing exactly what would be saved right now. COOL_TEMP_C/
+ * COOL_FAN_PCT are emitted as globals by presets_edit_get_handler() (from
+ * the same roast_profile.h constants the server enforces on save), so the
+ * Cooling segment's fixed values never drift out of sync with reality. */
+#define PRESET_PREVIEW_SCRIPT \
+    "<script>" \
+    "(function(){" \
+    "var canvas=document.getElementById('previewChart');if(!canvas)return;" \
+    "var ctx=canvas.getContext('2d');" \
+    "var PAD_TOP=14,PAD_BOTTOM=14;" \
+    "function mapY(value,max,h){return PAD_TOP+(1-value/max)*(h-PAD_TOP-PAD_BOTTOM);}" \
+    "function readSegments(){" \
+    "var segs=[];" \
+    "document.querySelectorAll('.segrow').forEach(function(r){" \
+    "var d=parseFloat(r.querySelector('.sdur').value)||0;" \
+    "var t=parseFloat(r.querySelector('.stemp').value)||0;" \
+    "var f=parseFloat(r.querySelector('.sfan').value)||0;" \
+    "segs.push({d:d,t:t,f:f});" \
+    "});" \
+    "var cd=document.getElementById('coolDur');" \
+    "segs.push({d:cd?(parseFloat(cd.value)||0):0,t:COOL_TEMP_C,f:COOL_FAN_PCT});" \
+    "return segs;" \
+    "}" \
+    "function drawPreview(){" \
+    "var segs=readSegments();" \
+    "var durationS=0;for(var i=0;i<segs.length;i++)durationS+=segs[i].d;" \
+    "if(durationS<=0)durationS=1;" \
+    "canvas.width=canvas.clientWidth;canvas.height=240;" \
+    "var w=canvas.width,h=canvas.height;" \
+    "ctx.clearRect(0,0,w,h);" \
+    "ctx.strokeStyle='#333';ctx.lineWidth=1;ctx.beginPath();" \
+    "for(var i=1;i<4;i++){var y=PAD_TOP+(h-PAD_TOP-PAD_BOTTOM)*i/4;ctx.moveTo(0,y);ctx.lineTo(w,y);}" \
+    "ctx.stroke();" \
+    "function plot(getVal,max,color){" \
+    "ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();" \
+    "var cursor=0,started=false;" \
+    "for(var s=0;s<segs.length;s++){" \
+    "var seg=segs[s];var x0=w*cursor/durationS;var x1=w*(cursor+seg.d)/durationS;" \
+    "var y=mapY(getVal(seg),max,h);" \
+    "if(!started){ctx.moveTo(x0,y);started=true;}else{ctx.lineTo(x0,y);}" \
+    "ctx.lineTo(x1,y);cursor+=seg.d;" \
+    "}" \
+    "ctx.stroke();" \
+    "}" \
+    "plot(function(s){return s.t;},260,'#FF9746');" \
+    "plot(function(s){return s.f;},100,'#66BB6A');" \
+    "ctx.font='11px sans-serif';" \
+    "var cursor=0;" \
+    "for(var s=0;s<segs.length;s++){" \
+    "var seg=segs[s];var mid=cursor+seg.d/2;cursor+=seg.d;" \
+    "var x=w*mid/durationS;" \
+    "var ty=mapY(seg.t,260,h);var fy=mapY(seg.f,100,h);" \
+    "ctx.fillStyle='#FF9746';ctx.fillText(seg.t.toFixed(0),x-8,ty-6);" \
+    "ctx.fillStyle='#66BB6A';ctx.fillText(seg.f+'%',x-8,fy+14);" \
+    "}" \
+    "var tm=Math.floor(durationS/60),ts=Math.floor(durationS%60);" \
+    "var totalEl=document.getElementById('previewTotal');" \
+    "if(totalEl)totalEl.textContent='Total: '+tm+':'+(ts<10?'0':'')+ts;" \
+    "}" \
+    "window.updatePreviewChart=drawPreview;" \
+    "document.addEventListener('input',function(e){" \
+    "if(!e.target||!e.target.classList)return;" \
+    "var c=e.target.classList;" \
+    "if(c.contains('sdur')||c.contains('stemp')||c.contains('sfan')||e.target.id==='coolDur')drawPreview();" \
+    "});" \
+    "document.addEventListener('change',function(e){" \
+    "if(e.target&&e.target.classList&&e.target.classList.contains('sfan'))drawPreview();" \
+    "});" \
+    "window.addEventListener('resize',drawPreview);" \
+    "drawPreview();" \
+    "})();" \
+    "</script>"
+
+/* Builds the <option> list for a `.sfan` <select>, one per valid discrete
+ * fan level (matching the L1/L2/L3 levels the on-device profile editor and
+ * live dashboard already use - see hal/fan_pwm.h) - built from the HAL's
+ * own level<->percent table so this can never drift out of sync with it
+ * the way the old raw 0-100 percent <input> could. `current_pct` marks the
+ * matching option `selected`; pass 0 (never a valid nonzero level's
+ * percent) to leave none selected, so the browser defaults to the first
+ * (lowest, floor) level - the correct default for a freshly-added segment. */
+static void build_fan_select_html(char *buf, size_t buf_size, uint8_t current_pct)
+{
+    size_t used = 0;
+    for (uint8_t level = 1; level <= FAN_PWM_LEVEL_MAX && used < buf_size; level++) {
+        uint8_t pct = fan_pwm_level_to_pct(level);
+        int n = snprintf(buf + used, buf_size - used, "<option value='%u'%s>L%u (%u%%)</option>",
+                          (unsigned)pct, (pct == current_pct) ? " selected" : "", (unsigned)level, (unsigned)pct);
+        if (n < 0) {
+            break;
+        }
+        used += (size_t)n;
+    }
+    if (used < buf_size) {
+        buf[used] = '\0';
+    } else {
+        buf[buf_size - 1] = '\0';
+    }
+}
 
 static void decode_percent_inplace(char *s)
 {
@@ -274,9 +382,10 @@ static esp_err_t presets_edit_get_handler(httpd_req_t *req)
     httpd_resp_send_chunk(req, "</head><body><div class='app'>", HTTPD_RESP_USE_STRLEN);
     web_ui_send_nav_bar(req, "presets");
 
-    char header[512];
+    char header[640];
     snprintf(header, sizeof(header),
-             "<main class='content'><div class='card'>"
+             "<main class='content' style='display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap'>"
+             "<div class='card' style='flex:1;min-width:320px'>"
              "<h1>%s Preset</h1>"
              "<label style='color:var(--muted);font-size:13px;display:block;margin:8px 0 4px'>Name</label>"
              "<input id='nameInput' type='text' value='%s' maxlength='31' style='width:100%%;padding:8px;"
@@ -289,10 +398,11 @@ static esp_err_t presets_edit_get_handler(httpd_req_t *req)
     /* Every point EXCEPT the last (mandatory Cooling, rendered separately
      * below) is a plain heating row - no more per-segment Cooling toggle. */
     for (uint8_t i = 0; i + 1 < profile.point_count; i++) {
-        char row[900];
+        char fan_opts[160];
         const roast_profile_point_t *pt = &profile.points[i];
-        snprintf(row, sizeof(row), SEG_ROW_TEMPLATE, (unsigned)pt->duration_s, (double)pt->target_temp_c,
-                 (unsigned)pt->target_fan_pct);
+        build_fan_select_html(fan_opts, sizeof(fan_opts), pt->target_fan_pct);
+        char row[1100];
+        snprintf(row, sizeof(row), SEG_ROW_TEMPLATE, (unsigned)pt->duration_s, (double)pt->target_temp_c, fan_opts);
         httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
     }
     httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
@@ -303,11 +413,12 @@ static esp_err_t presets_edit_get_handler(httpd_req_t *req)
     /* Mandatory trailing Cooling segment - not a toggle anymore, always
      * present, only its duration is operator-editable (fixed 0C/100% fan,
      * per roast_profile.h). */
-    char cooling_html[400]; /* the fixed literal HTML alone is ~320 bytes - 300 was too tight (format-truncation build error) */
+    char cooling_html[420]; /* the fixed literal HTML alone is ~320 bytes - 300 was too tight (format-truncation build error) */
     snprintf(cooling_html, sizeof(cooling_html),
              "<h2 style='margin-top:16px'>Cooling (mandatory)</h2>"
-             "<div class='row' style='flex-wrap:wrap;gap:6px'>"
-             "<input id='coolDur' type='number' value='%u' min='15' max='1800' step='15' style='width:70px'>s&nbsp;"
+             "<div class='row' style='flex-wrap:wrap;justify-content:flex-start;gap:14px'>"
+             "<span style='display:inline-flex;align-items:center;gap:4px'>"
+             "<input id='coolDur' type='number' value='%u' min='30' max='1800' step='30' style='width:70px'>s</span>"
              "<span style='color:var(--muted);font-size:13px'>Fixed: 0&#8451;, 100%% fan - always runs last</span>"
              "</div>",
              (unsigned)profile.points[profile.point_count - 1].duration_s);
@@ -321,12 +432,41 @@ static esp_err_t presets_edit_get_handler(httpd_req_t *req)
                                  "<button type='button' class='danger' onclick='deletePreset()'>Delete Profile</button>"
                                  "<a class='btnlink' href='/presets'>Cancel</a></div>",
                            HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, "<p id='editStatus' class='sub'></p></div></main></div>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "<p id='editStatus' class='sub'></p></div>", HTTPD_RESP_USE_STRLEN);
+
+    /* Live preview card - fills the space next to the form (previously
+     * empty on wider screens); see PRESET_PREVIEW_SCRIPT for the drawing
+     * logic, which reads straight from this same form's fields. */
+    httpd_resp_send_chunk(req,
+                           "<div class='card' style='flex:1;min-width:320px'>"
+                           "<h2>Live Preview</h2>"
+                           "<canvas id='previewChart' style='width:100%;display:block'></canvas>"
+                           "<p id='previewTotal' class='sub'></p>"
+                           "</div>"
+                           "</main></div>",
+                           HTTPD_RESP_USE_STRLEN);
 
     char id_script[48];
     snprintf(id_script, sizeof(id_script), "<script>var presetId=%d;</script>", id);
     httpd_resp_send_chunk(req, id_script, HTTPD_RESP_USE_STRLEN);
+
+    /* Shared option list for addRow()'s dynamically-created .sfan <select>s -
+     * built from the same HAL table as the server-rendered rows above so
+     * the two can never drift apart; current_pct=0 leaves nothing selected,
+     * so the browser defaults a new row to the first (lowest floor) level. */
+    char new_row_fan_opts[160];
+    build_fan_select_html(new_row_fan_opts, sizeof(new_row_fan_opts), 0);
+    char fan_opts_script[256];
+    snprintf(fan_opts_script, sizeof(fan_opts_script), "<script>var FAN_OPTIONS_HTML=`%s`;</script>", new_row_fan_opts);
+    httpd_resp_send_chunk(req, fan_opts_script, HTTPD_RESP_USE_STRLEN);
+
+    char cooling_const_script[96];
+    snprintf(cooling_const_script, sizeof(cooling_const_script), "<script>var COOL_TEMP_C=%.1f;var COOL_FAN_PCT=%u;</script>",
+             (double)ROAST_PROFILE_COOLING_TEMP_C, (unsigned)ROAST_PROFILE_COOLING_FAN_PCT);
+    httpd_resp_send_chunk(req, cooling_const_script, HTTPD_RESP_USE_STRLEN);
+
     httpd_resp_send_chunk(req, PRESET_EDIT_SCRIPT, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, PRESET_PREVIEW_SCRIPT, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, "</body></html>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;

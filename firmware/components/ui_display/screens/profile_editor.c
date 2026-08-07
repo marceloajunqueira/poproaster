@@ -14,13 +14,13 @@
 
 static const char *TAG = "profile_editor";
 
-/* Duration steps in whole 15s increments, clamped to a sane [15s, 30min]
+/* Duration steps in whole 30s increments, clamped to a sane [30s, 30min]
  * per-segment range; temp steps by 5C. Fan is quantized to 3 discrete
  * levels (80/90/100%, see hal/fan_pwm.h) - the stepper below moves
  * one LEVEL at a time (1-3, never 0 - a non-Cooling segment always needs
  * the fan on), not an arbitrary percentage. */
-#define DURATION_STEP_S 15
-#define DURATION_MIN_S 15
+#define DURATION_STEP_S 30
+#define DURATION_MIN_S 30
 #define DURATION_MAX_S 1800
 #define TEMP_STEP_C 5.0f
 

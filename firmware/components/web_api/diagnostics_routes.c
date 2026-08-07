@@ -262,12 +262,13 @@ static void send_pid_tuning_section(httpd_req_t *req)
     heater_pid_tuning_t t;
     heater_pid_get_tuning(&t);
 
-    char buf[768];
+    char buf[1536];
     httpd_resp_send_chunk(req, "<h2>PID Tuning: Live Gains</h2>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req,
                            "<p class='sub'>Applies immediately to the running controller and resets the integral. "
                            "'Apply' is RAM-only (lost on reboot); 'Apply &amp; Save' also persists to NVS. "
-                           "API: <code>GET/POST /api/pid_tuning</code> (form fields kp, ki, kd, margin_c, persist).</p>",
+                           "API: <code>GET/POST /api/pid_tuning</code> (form fields kp, ki, kd, margin_c, d_tau_s, "
+                           "sp_ramp_c_s).</p>",
                            HTTPD_RESP_USE_STRLEN);
 
     snprintf(buf, sizeof(buf),
@@ -276,13 +277,21 @@ static void send_pid_tuning_section(httpd_req_t *req)
              "<label>Ki <input id='pidKi' type='number' step='0.001' min='0' value='%.4f' style='width:6em'></label>"
              "<label>Kd <input id='pidKd' type='number' step='0.1' min='0' value='%.4f' style='width:6em'></label>"
              "<label>Cutoff margin &deg;C <input id='pidMargin' type='number' step='0.5' min='0.5' value='%.2f' style='width:6em'></label>"
+             "<label>D filter &tau; s <input id='pidDTau' type='number' step='0.5' min='0' value='%.2f' style='width:6em'></label>"
+             "<label>Setpoint ramp &deg;C/s <input id='pidSpRamp' type='number' step='0.1' min='0' value='%.2f' style='width:6em'></label>"
              "</div>"
+             "<p class='sub'>D filter &tau;: low-pass filters the derivative term only, to reduce oscillation from "
+             "sensor lag/noise amplified by Kd. 0 = no filtering (raw derivative). Setpoint ramp: caps how fast the "
+             "internal target can move toward a big jump (Manual Target Temp, PREHEAT) instead of stepping to it "
+             "instantly, so the integral doesn't wind up and overshoot on the first approach. 0 = no ramping "
+             "(instant target).</p>"
              "<div class='btnrow'>"
              "<button id='pidTuneApplyBtn'>Apply</button>"
              "<button id='pidTuneSaveBtn'>Apply &amp; Save</button>"
              "<span id='pidTuneStatus' class='sub'></span>"
              "</div>",
-             (double)t.kp, (double)t.ki, (double)t.kd, (double)t.hard_overshoot_margin_c);
+             (double)t.kp, (double)t.ki, (double)t.kd, (double)t.hard_overshoot_margin_c, (double)t.d_filter_tau_s,
+             (double)t.setpoint_ramp_c_per_s);
     httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -308,14 +317,17 @@ static void send_pid_autotune_section(httpd_req_t *req)
     httpd_resp_send_chunk(req,
                            "<p class='sub'>Switches the heater between two fixed duties to make bean temp oscillate "
                            "around the setpoint, then derives Ku/Pu and Ziegler-Nichols gains. "
-                           "Keep the setpoint well below the tunnel thermostat's trip point and set the fan level "
-                           "FIRST - the resulting gains are only valid for that airflow. Aborts by itself on "
-                           "overshoot, protector trip, fan drop or sensor fault.</p>",
+                           "Set the fan level FIRST - the resulting gains are only valid for that airflow. "
+                           "If Max Heater Power (above) is capped below 100%, the relay's requested output is "
+                           "scaled down before it reaches the heater - the result is still correct but the run "
+                           "will be slower; consider setting it to 100% first. Aborts by itself on overshoot, "
+                           "fan drop or sensor fault.</p>",
                            HTTPD_RESP_USE_STRLEN);
 
     snprintf(buf, sizeof(buf),
              "<p><b>Status:</b> %s &mdash; %s<br>"
-             "<span class='sub'>elapsed %us, phases %u, crossings %u, fan at start %u%%</span></p>"
+             "<span class='sub'>elapsed %us, phase %u/%u, crossings %u, fan at start %u%%, heater cap %u%% "
+             "(effective high %u%%)</span></p>"
              "<div class='btnrow'>"
              "<label>Setpoint &deg;C <input id='atSetpoint' type='number' step='1' min='40' max='200' value='%.0f' style='width:6em'></label>"
              "<label>Relay high %% <input id='atHigh' type='number' step='1' min='1' max='100' value='%u' style='width:5em'></label>"
@@ -327,9 +339,10 @@ static void send_pid_autotune_section(httpd_req_t *req)
              "<span id='atStatus' class='sub'></span>"
              "</div>"
              "<div id='atResult' class='sub'></div>",
-             state_str, st.message, (unsigned)st.elapsed_s, (unsigned)st.phase_count, (unsigned)st.zc_count,
-             (unsigned)st.fan_pct_at_start,
-             (double)((st.setpoint_c > 0.0f) ? st.setpoint_c : 130.0f),
+             state_str, st.message, (unsigned)st.elapsed_s, (unsigned)st.phase_count, (unsigned)st.phase_count_max,
+             (unsigned)st.zc_count, (unsigned)st.fan_pct_at_start, (unsigned)st.heater_power_cap_pct,
+             (unsigned)st.effective_output_positive_pct,
+             (double)((st.setpoint_c > 0.0f) ? st.setpoint_c : 150.0f),
              (unsigned)((st.output_positive_pct > 0) ? st.output_positive_pct : 70),
              (unsigned)st.output_negative_pct);
     httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
@@ -389,11 +402,14 @@ static esp_err_t diagnostics_get_handler(httpd_req_t *req)
                            "+'&ki='+document.getElementById('pidKi').value"
                            "+'&kd='+document.getElementById('pidKd').value"
                            "+'&margin_c='+document.getElementById('pidMargin').value"
+                           "+'&d_tau_s='+document.getElementById('pidDTau').value"
+                           "+'&sp_ramp_c_s='+document.getElementById('pidSpRamp').value"
                            "+(persist?'&persist=1':'');"
                            "fetch('/api/pid_tuning',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b})"
                            ".then(function(r){return r.json();})"
                            ".then(function(j){document.getElementById('pidTuneStatus').textContent="
-                           "'Applied: Kp='+j.kp+' Ki='+j.ki+' Kd='+j.kd+' margin='+j.margin_c+(persist?' (saved)':'');})"
+                           "'Applied: Kp='+j.kp+' Ki='+j.ki+' Kd='+j.kd+' margin='+j.margin_c+' d_tau='+j.d_tau_s"
+                           "+' sp_ramp='+j.sp_ramp_c_s+(persist?' (saved)':'');})"
                            ".catch(function(){document.getElementById('pidTuneStatus').textContent='Failed';});"
                            "}"
                            "document.getElementById('pidTuneApplyBtn').addEventListener('click',function(){applyTuning(false);});"
@@ -418,7 +434,7 @@ static esp_err_t diagnostics_get_handler(httpd_req_t *req)
                            "fetch('/api/pid_autotune').then(function(r){return r.json();}).then(function(j){"
                            "atLast=j;"
                            "document.getElementById('atStatus').textContent=j.state+' - '+j.message"
-                           "+' ('+j.elapsed_s+'s, '+j.phases+' phases)';"
+                           "+' ('+j.elapsed_s+'s, phase '+j.phases+'/'+j.max_phases+')';"
                            "if(j.state==='SUCCEEDED'){"
                            "document.getElementById('atResult').innerHTML='<b>Ku='+j.ku.toFixed(2)+' Pu='+j.pu_s.toFixed(1)+'s</b>'"
                            "+atRow('zn_classic','Ziegler-Nichols',j.zn_classic)"
@@ -485,19 +501,21 @@ static esp_err_t pid_log_clear_post_handler(httpd_req_t *req)
  * real"): lets gains be read and changed while the roaster is running, so a
  * tuning session iterates in seconds instead of one rebuild+OTA per attempt.
  *
- *   GET  /api/pid_tuning  -> {"kp":1.5,"ki":0.034,"kd":5.3,"margin_c":8.0}
- *   POST /api/pid_tuning  -> form-encoded kp/ki/kd/margin_c (any subset;
- *                            omitted fields keep their current value),
- *                            plus optional persist=1 to save to NVS.
+ *   GET  /api/pid_tuning  -> {"kp":1.5,"ki":0.034,"kd":5.3,"margin_c":8.0,"d_tau_s":2.0,"sp_ramp_c_s":1.0}
+ *   POST /api/pid_tuning  -> form-encoded kp/ki/kd/margin_c/d_tau_s/sp_ramp_c_s
+ *                            (any subset; omitted fields keep their current
+ *                            value), plus optional persist=1 to save to NVS.
  */
 static esp_err_t pid_tuning_get_handler(httpd_req_t *req)
 {
     heater_pid_tuning_t t;
     heater_pid_get_tuning(&t);
 
-    char body[160];
-    snprintf(body, sizeof(body), "{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f,\"margin_c\":%.2f}", (double)t.kp,
-             (double)t.ki, (double)t.kd, (double)t.hard_overshoot_margin_c);
+    char body[192];
+    snprintf(body, sizeof(body),
+             "{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f,\"margin_c\":%.2f,\"d_tau_s\":%.2f,\"sp_ramp_c_s\":%.2f}",
+             (double)t.kp, (double)t.ki, (double)t.kd, (double)t.hard_overshoot_margin_c, (double)t.d_filter_tau_s,
+             (double)t.setpoint_ramp_c_per_s);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -524,11 +542,14 @@ static esp_err_t pid_tuning_post_handler(httpd_req_t *req)
 
     /* Negative sentinels mean "field not supplied" - heater_pid_set_tuning()
      * leaves those gains untouched. */
-    heater_pid_tuning_t t = { .kp = -1.0f, .ki = -1.0f, .kd = -1.0f, .hard_overshoot_margin_c = -1.0f };
+    heater_pid_tuning_t t = { .kp = -1.0f, .ki = -1.0f, .kd = -1.0f, .hard_overshoot_margin_c = -1.0f,
+                              .d_filter_tau_s = -1.0f, .setpoint_ramp_c_per_s = -1.0f };
     parse_float_field(body, "kp", &t.kp);
     parse_float_field(body, "ki", &t.ki);
     parse_float_field(body, "kd", &t.kd);
     parse_float_field(body, "margin_c", &t.hard_overshoot_margin_c);
+    parse_float_field(body, "d_tau_s", &t.d_filter_tau_s);
+    parse_float_field(body, "sp_ramp_c_s", &t.setpoint_ramp_c_per_s);
 
     char persist_param[8] = { 0 };
     bool persist = (httpd_query_key_value(body, "persist", persist_param, sizeof(persist_param)) == ESP_OK) &&
@@ -559,17 +580,20 @@ static esp_err_t pid_autotune_get_handler(httpd_req_t *req)
     default: break;
     }
 
-    char body[640];
+    char body[768];
     snprintf(body, sizeof(body),
              "{\"state\":\"%s\",\"message\":\"%s\",\"setpoint_c\":%.1f,\"fan_pct\":%u,\"elapsed_s\":%u,"
-             "\"phases\":%u,\"crossings\":%u,\"ku\":%.4f,\"pu_s\":%.2f,"
+             "\"phases\":%u,\"max_phases\":%u,\"crossings\":%u,\"ku\":%.4f,\"pu_s\":%.2f,"
+             "\"heater_cap_pct\":%u,\"effective_positive_pct\":%u,\"relay_positive\":%s,"
              "\"zc_symmetrical\":%s,\"amplitude_convergent\":%s,"
              "\"zn_classic\":{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f},"
              "\"some_overshoot\":{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f},"
              "\"no_overshoot\":{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f}}",
              state_str, st.message, (double)st.setpoint_c, (unsigned)st.fan_pct_at_start,
-             (unsigned)st.elapsed_s, (unsigned)st.phase_count, (unsigned)st.zc_count, (double)st.ku,
-             (double)st.pu_s, st.zc_symmetrical ? "true" : "false",
+             (unsigned)st.elapsed_s, (unsigned)st.phase_count, (unsigned)st.phase_count_max,
+             (unsigned)st.zc_count, (double)st.ku, (double)st.pu_s, (unsigned)st.heater_power_cap_pct,
+             (unsigned)st.effective_output_positive_pct, st.relay_positive ? "true" : "false",
+             st.zc_symmetrical ? "true" : "false",
              st.amplitude_convergent ? "true" : "false", (double)st.zn_classic.kp, (double)st.zn_classic.ki,
              (double)st.zn_classic.kd, (double)st.some_overshoot.kp, (double)st.some_overshoot.ki,
              (double)st.some_overshoot.kd, (double)st.no_overshoot.kp, (double)st.no_overshoot.ki,

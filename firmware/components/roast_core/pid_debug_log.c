@@ -66,7 +66,7 @@ static size_t s_cached_size;
 static const char *CSV_HEADER =
     "t_ms,mode,phase,elapsed_s,target_c,measured_c,sensor_valid,error_c,p_term,i_term,d_term,"
     "pid_raw_pct,hard_cutoff,requested_heater_pct,applied_heater_pct,target_fan_pct,real_fan_pct,"
-    "kp,ki,kd,protector_open,protector_trips,protector_ceiling_c\n";
+    "kp,ki,kd\n";
 
 static const char *phase_str(roast_phase_t phase)
 {
@@ -184,19 +184,15 @@ void pid_debug_log_record(const char *mode_str, roast_phase_t phase, uint32_t el
     heater_pid_tuning_t tuning;
     heater_pid_get_tuning(&tuning);
 
-    heater_pid_protector_status_t prot;
-    heater_pid_get_protector_status(&prot);
-
     pid_log_entry_t entry;
     snprintf(entry.line, sizeof(entry.line),
-             "%lld,%s,%s,%u,%.1f,%.1f,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%u,%u,%u,%u,%.4f,%.4f,%.4f,%d,%u,%.1f\n",
+             "%lld,%s,%s,%u,%.1f,%.1f,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%u,%u,%u,%u,%.4f,%.4f,%.4f\n",
              (long long)(esp_timer_get_time() / 1000), mode_str, phase_str(phase), (unsigned)elapsed_s,
              (double)target_temp_c, (double)measured_temp_c, (int)sensor_valid, (double)dbg.error_c,
              (double)dbg.p_term, (double)dbg.i_term, (double)dbg.d_term, (double)dbg.raw_output,
              (int)dbg.hard_cutoff, (unsigned)requested_heater_pct, (unsigned)applied_heater_pct,
              (unsigned)target_fan_pct, (unsigned)real_fan_pct,
-             (double)tuning.kp, (double)tuning.ki, (double)tuning.kd,
-             (int)prot.open, (unsigned)prot.trip_count, (double)prot.ceiling_c);
+             (double)tuning.kp, (double)tuning.ki, (double)tuning.kd);
 
     /* Zero timeout: this runs on the high-priority esp_timer task driving the
      * 1Hz control loop - it must never block on storage. Dropping a row under

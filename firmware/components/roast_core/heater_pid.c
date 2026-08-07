@@ -41,11 +41,38 @@ static const char *TAG = "heater_pid";
 #define PID_OUTPUT_MIN 0.0f
 #define PID_OUTPUT_MAX 100.0f
 
+/* Operator-reported (2026-08-05): after an autotune run applied a large Kd
+ * (~15), bean temp still "sobe e desce bastante" (oscillates a lot). The
+ * BT sensor has real physical thermal lag (it sits in the air stream, not
+ * on the element) PLUS its own EMA smoothing (roaster_hal/max6675.c) on
+ * top - a derivative term computed every 1s from that already-lagged,
+ * still-slightly-noisy signal amplifies small fluctuations into visible
+ * output swings, independent of whether Kp/Ki themselves are reasonable.
+ * This time constant low-pass-filters the MEASUREMENT fed to the D term
+ * only. Default chosen as a moderate value relative to this plant's
+ * measured ~56s oscillation period (pid_autotune.c) - enough to
+ * meaningfully cut per-tick noise sensitivity without meaningfully lagging
+ * the real trend. */
+#define PID_D_FILTER_TAU_DEFAULT_S 2.0f
+
+/* Operator-reported (2026-08-07): a big instant target step (Manual Target
+ * Temp, or PREHEAT) reliably overshoots into the hard cutoff below on the
+ * FIRST approach, then crashes and recovers. Root cause is the control loop
+ * being fed a step its real thermal lag/mass can't track cleanly - see the
+ * long comment on setpoint ramping in heater_pid_update(). 1.0C/s means a
+ * 130C rise (e.g. room temp to a 175C target) ramps over ~130s (~2min) -
+ * fast enough that PREHEAT isn't slowed to a crawl, but gentle enough that
+ * the tracking error stays small throughout instead of spiking into a huge
+ * integral windup. */
+#define PID_SETPOINT_RAMP_DEFAULT_C_PER_S 1.0f
+
 #define PID_NVS_NAMESPACE "roast_cfg"
 #define PID_NVS_KEY_KP "pid_kp"
 #define PID_NVS_KEY_KI "pid_ki"
 #define PID_NVS_KEY_KD "pid_kd"
 #define PID_NVS_KEY_MARGIN "pid_margin"
+#define PID_NVS_KEY_D_TAU "pid_dtau"
+#define PID_NVS_KEY_SP_RAMP "pid_spramp"
 
 /* SAFETY BACKSTOP: this drum's BT sensor sits in the circulating air (not
  * on the element itself), so there's a real, significant thermal lag
@@ -64,52 +91,21 @@ static const char *TAG = "heater_pid";
  * smoothly before this backstop ever has to intervene. */
 #define PID_HARD_OVERSHOOT_MARGIN_DEFAULT_C 8.0f
 
-/* ---- Thermal-protector observer thresholds -------------------------------
- *
- * Derived from logs/pid_debug_4.csv, not guessed. Scanning that session's
- * MANUAL rows for "heater genuinely driven AND temperature falling fast":
- *
- *   applied >= 50% AND dT/dt <= -1.5 C/s
- *
- * matches ONLY inside the three collapse windows (t=328-342, 410-425,
- * 455-464) and never once during normal heating - where, at the same duty,
- * dT/dt stayed positive (up to +3.4 C/s). The fastest fall recorded while
- * commanded at maximum was -4.5 C/s, so -1.5 sits comfortably between the
- * two populations. Requiring several consecutive ticks rejects single-sample
- * sensor glitches (the MAX6675 is EMA-filtered at alpha=0.25, so a real
- * collapse persists for many ticks while noise does not). */
-#define PROTECTOR_MIN_APPLIED_PCT 50
-#define PROTECTOR_FALL_RATE_C_PER_S (-1.5f)
-#define PROTECTOR_CONFIRM_TICKS 3
-
-/* Once tripped, wait until the measurement has dropped this far below the
- * trip point before resuming control. The bimetal needs real hysteresis to
- * re-close, and resuming too early just walks straight back into it. */
-#define PROTECTOR_RECOVER_DROP_C 25.0f
-
-/* After a trip, hold the target this far below the temperature the trip
- * happened at. This is what actually breaks the cycle: the log shows the
- * machine tripping at ~194C twice in 90s because nothing stopped it from
- * aiming right back at the same place. */
-#define PROTECTOR_CEILING_MARGIN_C 15.0f
-
 static float s_integral;
 static float s_prev_measured_c;
 static bool s_has_prev;
+static float s_d_filtered; /* Low-pass-filtered rate of change, used ONLY for the D term - see PID_D_FILTER_TAU_DEFAULT_S. */
+static float s_ramped_target_c; /* Internal setpoint, advanced toward the real target at a bounded rate - see PID_SETPOINT_RAMP_DEFAULT_C_PER_S. */
+static bool s_ramp_has_value;
 static heater_pid_debug_t s_last_debug;
-
-static uint8_t s_last_applied_pct;
-static bool s_protector_open;
-static uint32_t s_protector_trip_count;
-static float s_protector_trip_temp_c;
-static float s_protector_ceiling_c;
-static uint8_t s_protector_fall_ticks;
 
 static heater_pid_tuning_t s_tuning = {
     .kp = PID_KP_DEFAULT,
     .ki = PID_KI_DEFAULT,
     .kd = PID_KD_DEFAULT,
     .hard_overshoot_margin_c = PID_HARD_OVERSHOOT_MARGIN_DEFAULT_C,
+    .d_filter_tau_s = PID_D_FILTER_TAU_DEFAULT_S,
+    .setpoint_ramp_c_per_s = PID_SETPOINT_RAMP_DEFAULT_C_PER_S,
 };
 
 void heater_pid_reset(void)
@@ -117,15 +113,8 @@ void heater_pid_reset(void)
     s_integral = 0.0f;
     s_prev_measured_c = 0.0f;
     s_has_prev = false;
-    /* Detection state is transient and must not survive a reset (a stale
-     * rate across a gap would be meaningless), but the LATCHED protector
-     * findings - trip count and learned ceiling - deliberately do survive:
-     * they describe the machine, not the current control episode, and
-     * clearing them on every session start would let the controller walk
-     * back into the same trip. heater_pid_clear_protector_state() is the
-     * explicit way to forget them. */
-    s_protector_fall_ticks = 0;
-    s_last_applied_pct = 0;
+    s_d_filtered = 0.0f; /* Re-seeded from the first real rate sample below, like s_prev_measured_c. */
+    s_ramp_has_value = false; /* Re-seeded from the current measurement on the next update() call. */
 }
 
 uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s)
@@ -134,92 +123,76 @@ uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s
         dt_s = 1.0f;
     }
 
-    /* Rate of change is needed by BOTH the derivative term and the thermal
-     * protector observer, so it is computed once up front - before the hard
-     * overshoot cutoff, which returns early. */
+    /* Rate of change is needed by the derivative term, computed once up
+     * front - before the hard overshoot cutoff, which returns early. */
     float d_measured = s_has_prev ? (measured_temp_c - s_prev_measured_c) / dt_s : 0.0f;
     bool had_prev = s_has_prev;
     s_prev_measured_c = measured_temp_c;
     s_has_prev = true;
 
-    /* ---- Thermal protector observer ----
-     * The hardware protectors give no electrical feedback, so the only
-     * evidence is "we are genuinely driving the element hard, yet the air
-     * temperature is collapsing". See heater_pid.h for the full rationale
-     * and the log evidence behind these thresholds. */
-    if (!s_protector_open) {
-        if (had_prev && s_last_applied_pct >= PROTECTOR_MIN_APPLIED_PCT &&
-            d_measured <= PROTECTOR_FALL_RATE_C_PER_S) {
-            if (s_protector_fall_ticks < PROTECTOR_CONFIRM_TICKS) {
-                s_protector_fall_ticks++;
-            }
-            if (s_protector_fall_ticks >= PROTECTOR_CONFIRM_TICKS) {
-                s_protector_open = true;
-                s_protector_trip_count++;
-                /* The collapse has already been running for CONFIRM_TICKS, so
-                 * reconstruct roughly where it started rather than recording
-                 * the (already much lower) current reading. */
-                s_protector_trip_temp_c = measured_temp_c - (d_measured * (float)PROTECTOR_CONFIRM_TICKS * dt_s);
-                s_protector_ceiling_c = s_protector_trip_temp_c - PROTECTOR_CEILING_MARGIN_C;
-                ESP_LOGW(TAG,
-                         "Thermal protector appears OPEN (trip #%u): fell %.1f C/s at %u%% duty, onset ~%.1f C. "
-                         "Backing off and capping target at %.1f C.",
-                         (unsigned)s_protector_trip_count, (double)d_measured, (unsigned)s_last_applied_pct,
-                         (double)s_protector_trip_temp_c, (double)s_protector_ceiling_c);
-            }
+    /* First-order low-pass filter of the rate, used ONLY by the D term
+     * below. tau_s=0 makes alpha=1, i.e. the filtered value equals the raw
+     * one instantly (no filtering) - operators who explicitly set the
+     * tuning field to 0 get the exact old unfiltered behavior back. */
+    float alpha_d = dt_s / (s_tuning.d_filter_tau_s + dt_s);
+    s_d_filtered = had_prev ? (s_d_filtered + alpha_d * (d_measured - s_d_filtered)) : d_measured;
+
+    /* Setpoint ramp (operator-reported: a big instant step - Manual Target
+     * Temp, or PREHEAT holding a segment's target flat from room temp -
+     * winds the integral hard against a huge error for a long stretch, and
+     * by the time it's near target there's already too much stored heat
+     * "in flight" for the D term to stop in time, overshooting into the
+     * hard cutoff below and crashing. Raising the cutoff margin would only
+     * delay that same crash, not fix it - the actual bug is feeding the
+     * control loop a STEP when the real plant has real lag/mass. The fix:
+     * never feed the P/I/D math a bigger jump than the plant can plausibly
+     * track, by advancing an internal ramped setpoint toward the real
+     * target at a bounded rate instead of jumping to it instantly. This
+     * keeps the tracking error small throughout the approach, so the
+     * integral never winds up far enough to cause a real overshoot in the
+     * first place - the difference between preventing the problem and
+     * just moving the cutoff further away. <=0 disables ramping (instant
+     * target, the original behavior). The hard overshoot cutoff below
+     * deliberately still compares against the REAL final target_temp_c,
+     * not the ramped one, so it isn't weakened - it just rarely needs to
+     * fire anymore. */
+    float final_target_c = target_temp_c;
+    if (s_tuning.setpoint_ramp_c_per_s <= 0.0f) {
+        s_ramped_target_c = target_temp_c;
+    } else {
+        if (!s_ramp_has_value) {
+            s_ramped_target_c = measured_temp_c;
+            s_ramp_has_value = true;
+        }
+        float max_step = s_tuning.setpoint_ramp_c_per_s * dt_s;
+        if (target_temp_c > s_ramped_target_c + max_step) {
+            s_ramped_target_c += max_step;
+        } else if (target_temp_c < s_ramped_target_c - max_step) {
+            s_ramped_target_c -= max_step;
         } else {
-            s_protector_fall_ticks = 0;
+            s_ramped_target_c = target_temp_c;
         }
     }
-
-    if (s_protector_open) {
-        /* Command nothing at all until the tunnel has cooled well below the
-         * trip point. Two reasons: driving a coil whose circuit is open is
-         * pointless, and - the important one - it guarantees we are NOT
-         * sitting at 100% demand at the moment the bimetal re-closes, which
-         * is what turned a single trip into a repeating cycle in the log. */
-        s_integral = 0.0f;
-        if (measured_temp_c <= s_protector_trip_temp_c - PROTECTOR_RECOVER_DROP_C) {
-            s_protector_open = false;
-            s_protector_fall_ticks = 0;
-            ESP_LOGI(TAG, "Thermal protector recovered at %.1f C; resuming control under a %.1f C ceiling",
-                     (double)measured_temp_c, (double)s_protector_ceiling_c);
-        }
-        s_last_debug.error_c = target_temp_c - measured_temp_c;
-        s_last_debug.p_term = 0.0f;
-        s_last_debug.i_term = 0.0f;
-        s_last_debug.d_term = 0.0f;
-        s_last_debug.raw_output = 0.0f;
-        s_last_debug.hard_cutoff = true;
-        s_last_debug.protector_open = true;
-        return 0;
-    }
-
-    /* Never aim above a ceiling learned from a previous trip - otherwise the
-     * controller simply drives back into the protector every time. */
-    if (s_protector_ceiling_c > 0.0f && target_temp_c > s_protector_ceiling_c) {
-        target_temp_c = s_protector_ceiling_c;
-    }
+    target_temp_c = s_ramped_target_c;
 
     float error = target_temp_c - measured_temp_c;
 
-    if (error <= -s_tuning.hard_overshoot_margin_c) {
+    if (final_target_c - measured_temp_c <= -s_tuning.hard_overshoot_margin_c) {
         /* Already meaningfully over target - cut immediately and reset the
          * integral so there's no leftover windup once temperature comes
          * back down toward target. */
         s_integral = 0.0f;
-        s_last_debug.error_c = error;
+        s_last_debug.error_c = final_target_c - measured_temp_c;
         s_last_debug.p_term = 0.0f;
         s_last_debug.i_term = 0.0f;
         s_last_debug.d_term = 0.0f;
         s_last_debug.raw_output = 0.0f;
         s_last_debug.hard_cutoff = true;
-        s_last_debug.protector_open = false;
         return 0;
     }
 
     float p_term = s_tuning.kp * error;
-    float d_term = -s_tuning.kd * d_measured;
+    float d_term = -s_tuning.kd * s_d_filtered;
 
     /* Integral clamping anti-windup: bound the INTEGRAL'S OWN contribution
      * to the full output range, independently of p_term/d_term.
@@ -270,34 +243,8 @@ uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s
     s_last_debug.d_term = d_term;
     s_last_debug.raw_output = unclamped_output;
     s_last_debug.hard_cutoff = false;
-    s_last_debug.protector_open = false;
 
     return (uint8_t)(output + 0.5f);
-}
-
-void heater_pid_note_applied_pct(uint8_t applied_pct)
-{
-    s_last_applied_pct = applied_pct;
-}
-
-void heater_pid_get_protector_status(heater_pid_protector_status_t *out)
-{
-    if (out != NULL) {
-        out->open = s_protector_open;
-        out->trip_count = s_protector_trip_count;
-        out->last_trip_temp_c = s_protector_trip_temp_c;
-        out->ceiling_c = s_protector_ceiling_c;
-    }
-}
-
-void heater_pid_clear_protector_state(void)
-{
-    s_protector_open = false;
-    s_protector_fall_ticks = 0;
-    s_protector_trip_count = 0;
-    s_protector_trip_temp_c = 0.0f;
-    s_protector_ceiling_c = 0.0f;
-    ESP_LOGI(TAG, "Thermal protector observer state cleared by operator");
 }
 
 void heater_pid_get_last_debug(heater_pid_debug_t *out)
@@ -334,15 +281,22 @@ esp_err_t heater_pid_set_tuning(const heater_pid_tuning_t *tuning, bool persist)
     if (tuning->hard_overshoot_margin_c > 0.0f) {
         s_tuning.hard_overshoot_margin_c = tuning->hard_overshoot_margin_c;
     }
+    if (tuning->d_filter_tau_s >= 0.0f) {
+        s_tuning.d_filter_tau_s = tuning->d_filter_tau_s;
+    }
+    if (tuning->setpoint_ramp_c_per_s >= 0.0f) {
+        s_tuning.setpoint_ramp_c_per_s = tuning->setpoint_ramp_c_per_s;
+    }
 
     /* An integral accumulated under the old gains has no meaning under the
      * new ones - carrying it over would produce a spurious output step right
      * after the change. */
     heater_pid_reset();
 
-    ESP_LOGI(TAG, "PID tuning set: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC%s", (double)s_tuning.kp,
-             (double)s_tuning.ki, (double)s_tuning.kd, (double)s_tuning.hard_overshoot_margin_c,
-             persist ? " (persisted)" : "");
+    ESP_LOGI(TAG, "PID tuning set: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC d_tau=%.1fs sp_ramp=%.2fC/s%s",
+             (double)s_tuning.kp, (double)s_tuning.ki, (double)s_tuning.kd,
+             (double)s_tuning.hard_overshoot_margin_c, (double)s_tuning.d_filter_tau_s,
+             (double)s_tuning.setpoint_ramp_c_per_s, persist ? " (persisted)" : "");
 
     if (!persist) {
         return ESP_OK;
@@ -360,6 +314,8 @@ esp_err_t heater_pid_set_tuning(const heater_pid_tuning_t *tuning, bool persist)
     nvs_set_blob(nvs, PID_NVS_KEY_KD, &s_tuning.kd, sizeof(s_tuning.kd));
     nvs_set_blob(nvs, PID_NVS_KEY_MARGIN, &s_tuning.hard_overshoot_margin_c,
                  sizeof(s_tuning.hard_overshoot_margin_c));
+    nvs_set_blob(nvs, PID_NVS_KEY_D_TAU, &s_tuning.d_filter_tau_s, sizeof(s_tuning.d_filter_tau_s));
+    nvs_set_blob(nvs, PID_NVS_KEY_SP_RAMP, &s_tuning.setpoint_ramp_c_per_s, sizeof(s_tuning.setpoint_ramp_c_per_s));
     err = nvs_commit(nvs);
     nvs_close(nvs);
     return err;
@@ -387,9 +343,13 @@ esp_err_t heater_pid_load_tuning(void)
     load_float(nvs, PID_NVS_KEY_KI, &s_tuning.ki);
     load_float(nvs, PID_NVS_KEY_KD, &s_tuning.kd);
     load_float(nvs, PID_NVS_KEY_MARGIN, &s_tuning.hard_overshoot_margin_c);
+    load_float(nvs, PID_NVS_KEY_D_TAU, &s_tuning.d_filter_tau_s);
+    load_float(nvs, PID_NVS_KEY_SP_RAMP, &s_tuning.setpoint_ramp_c_per_s);
     nvs_close(nvs);
 
-    ESP_LOGI(TAG, "PID tuning loaded: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC", (double)s_tuning.kp,
-             (double)s_tuning.ki, (double)s_tuning.kd, (double)s_tuning.hard_overshoot_margin_c);
+    ESP_LOGI(TAG, "PID tuning loaded: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC d_tau=%.1fs sp_ramp=%.2fC/s",
+             (double)s_tuning.kp, (double)s_tuning.ki, (double)s_tuning.kd,
+             (double)s_tuning.hard_overshoot_margin_c, (double)s_tuning.d_filter_tau_s,
+             (double)s_tuning.setpoint_ramp_c_per_s);
     return ESP_OK;
 }

@@ -62,3 +62,16 @@ CONFIG_LWIP_MAX_SOCKETS=16
 # reboot the board (safe: GPIOs default OFF at boot) instead of just logging
 # a warning and hanging forever.
 CONFIG_ESP_TASK_WDT_PANIC=y
+
+# Crash fix (2026-08-07): the default 32KB LVGL object-memory pool was too
+# small for the profile editor screen with a real-world 5-segment profile
+# (each heating segment builds ~24 LVGL objects: card+2 rows+title+delete
+# button+3 steppers of 6 objects each) - decoded the crash backtrace
+# (addr2line against build/pop_roaster.elf) straight to
+# lv_obj_class_init_obj() -> lv_obj_mark_layout_as_dirty() dereferencing a
+# NULL `obj` inside lv_label_create() while building the mandatory trailing
+# Cooling segment's "Fixed: ..." label - i.e. lv_mem_alloc() silently
+# returned NULL (pool exhausted) and LVGL 8's allocator doesn't null-check
+# before use. Tripled to give real headroom for larger profiles too (up to
+# the 20-segment max).
+CONFIG_LV_MEM_SIZE_KILOBYTES=96

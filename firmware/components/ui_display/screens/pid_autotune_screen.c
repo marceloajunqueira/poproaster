@@ -22,13 +22,20 @@ static const char *TAG = "pid_autotune_screen";
  * - Fan forced to FAN_PWM_LEVEL_MAX (100%): airflow dominates this plant's
  *   gain (measured: the same heater duty settles ~30C higher at a lower fan
  *   level), so full airflow is both the most repeatable condition AND the
- *   one with the most headroom before the thermal protector/limits trip.
- * - Setpoint 130C: a logged open-loop step test at 64% duty/100% fan
- *   plateaued around 140C without ever tripping anything - well clear of
- *   the 230C warning / 240C absolute cutoff.
+ *   one with the most headroom before the absolute safety cutoff.
+ * - Setpoint 150C (raised from an earlier 130C, 2026-08-05): operator
+ *   feedback - real roast targets tested on this machine run up to ~170C+,
+ *   and a PID tuned at 130C did not generalize well up there (confirmed by
+ *   repeated large overshoot/undershoot at 170C with the 130C-derived
+ *   gains). 130C was originally chosen for extra margin under the physical
+ *   bimetallic thermostat's ~194C trip point - that hardware has since been
+ *   removed, so that specific constraint no longer applies. 150C sits much
+ *   closer to the real operating range while still leaving comfortable
+ *   headroom under the 230C warning / 240C absolute cutoff (even with the
+ *   25C overshoot-abort margin added on top: 175C worst case).
  * - Relay swing 70/0%: strong enough for a clean, fast-converging
  *   oscillation (d=35) without being an extreme duty cycle. */
-#define AUTOTUNE_SETPOINT_C 130.0f
+#define AUTOTUNE_SETPOINT_C 150.0f
 #define AUTOTUNE_RELAY_HIGH_PCT 70
 #define AUTOTUNE_RELAY_LOW_PCT 0
 /* Fan soft-start ramp is ~2000ms (hal/fan_pwm.c) - wait a bit longer than
@@ -205,7 +212,7 @@ static void refresh_timer_cb(lv_timer_t *timer)
         snprintf(buf, sizeof(buf), "%s", i18n_get(I18N_KEY_PID_AUTOTUNE_STATUS_IDLE));
     } else {
         snprintf(buf, sizeof(buf), i18n_get(I18N_KEY_PID_AUTOTUNE_STATUS_FMT), state_str(st.state),
-                 (unsigned)st.elapsed_s, (unsigned)st.phase_count, st.message);
+                 (unsigned)st.elapsed_s, (unsigned)st.phase_count, (unsigned)st.phase_count_max, st.message);
     }
     lv_label_set_text(s_status_label, buf);
 

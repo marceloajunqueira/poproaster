@@ -982,7 +982,15 @@ static void refresh_timer_cb(lv_timer_t *timer)
     if (elapsed_s < 0) {
         elapsed_s = 0;
     }
-    snprintf(buf, sizeof(buf), "%02d:%02d", (int)(elapsed_s / 60), (int)(elapsed_s % 60));
+    /* Total only shown for a real preset (s_chart_duration_s is a made-up
+     * 20min chart window, not an actual plan, whenever no profile is
+     * selected/Manual mode). */
+    if (s_has_profile && s_chart_duration_s > 0) {
+        snprintf(buf, sizeof(buf), "%02d:%02d / %02u:%02u", (int)(elapsed_s / 60), (int)(elapsed_s % 60),
+                 (unsigned)(s_chart_duration_s / 60), (unsigned)(s_chart_duration_s % 60));
+    } else {
+        snprintf(buf, sizeof(buf), "%02d:%02d", (int)(elapsed_s / 60), (int)(elapsed_s % 60));
+    }
     lv_label_set_text(s_timer_label, buf);
 
     /* Wi-Fi IP, top-right of the screen - refreshed every tick since the

@@ -111,11 +111,6 @@ static void drive_heating_segment(uint32_t elapsed_s, uint8_t segment_idx)
 
     float target_temp = roast_profile_get_target_temp_c(&s_profile, elapsed_s);
     uint8_t target_fan = roast_profile_get_target_fan_pct(&s_profile, elapsed_s);
-    /* Tell the thermal-protector observer what was ACTUALLY driving the
-     * element over the interval that just elapsed, before asking the PID to
-     * evaluate it - a temperature collapse only implicates the protector if
-     * real power was being delivered. */
-    heater_pid_note_applied_pct(ssr_heater_get_duty_pct());
     /* Keep the PID's internal state (integral/derivative) ticking every
      * follower period regardless of override, so it doesn't need to "catch
      * up" with a derivative kick once an override expires; only whether we
@@ -243,10 +238,6 @@ static void drive_manual_heater(void)
     roast_telemetry_snapshot_t snap;
     roast_telemetry_service_get_snapshot(&snap);
 
-    /* See drive_heating_segment(): the observer needs the duty that was
-     * really applied over the interval just elapsed. */
-    heater_pid_note_applied_pct(ssr_heater_get_duty_pct());
-
     uint8_t heater_target = heater_pid_update(s_manual_target_temp_c,
                                                snap.sensor_valid ? snap.bean_temp_c : s_manual_target_temp_c,
                                                FOLLOWER_PERIOD_US / 1000000.0f);
@@ -292,6 +283,13 @@ static void drive_step_test(void)
  * the duty directly, logged under mode="AUTOTUNE". */
 static bool s_autotune_result_applied;
 static bool s_autotune_fan_release_attempted;
+/* Operator-reported: a single transient MAX6675 read glitch (self-corrects
+ * the very next tick - a known, occasional, harmless occurrence elsewhere
+ * in this firmware) used to abort an entire ~10 minute autotune run
+ * instantly. Require several CONSECUTIVE invalid ticks (a real, sustained
+ * fault) before giving up, instead of a lone blip. */
+#define AUTOTUNE_SENSOR_INVALID_ABORT_TICKS 3
+static uint8_t s_autotune_invalid_ticks;
 
 static void drive_autotune(void)
 {
@@ -300,8 +298,9 @@ static void drive_autotune(void)
 
     uint8_t duty = 0;
     if (snap.sensor_valid) {
+        s_autotune_invalid_ticks = 0;
         duty = pid_autotune_update(snap.bean_temp_c);
-    } else {
+    } else if (++s_autotune_invalid_ticks >= AUTOTUNE_SENSOR_INVALID_ABORT_TICKS) {
         pid_autotune_abort("Sensor reading invalid");
     }
 
@@ -325,8 +324,8 @@ static void drive_autotune(void)
      * web Diagnostics page) happens to be open to see it. "No overshoot" is
      * the deliberately conservative pick of the three Ziegler-Nichols rule
      * sets pid_autotune.c computes - Ziegler-Nichols classic is known to
-     * leave ~25% overshoot, right where this machine's thermal protector
-     * tends to trip. */
+     * leave ~25% overshoot, more margin than needed against the absolute
+     * safety cutoff. */
     if (st.state == PID_AUTOTUNE_SUCCEEDED && !s_autotune_result_applied) {
         esp_err_t err = pid_autotune_apply_result(&st.no_overshoot, true);
         s_autotune_result_applied = true;
@@ -337,20 +336,39 @@ static void drive_autotune(void)
         s_autotune_result_applied = false; /* Reset so the next run's success also gets applied. */
     }
 
-    /* Bug report: "cancelei e o fan continuou ligado" - raising the fan to
-     * full speed to run the relay test is this subsystem's own side effect
+    /* Bug report: "cancelei e o fan continuou ligado" (and again: "quando
+     * cancela ou termina com a temperatura em mais de 100 graus ele nao
+     * desliga quando ela desce abaixo de 100") - raising the fan to full
+     * speed to run the relay test is this subsystem's own side effect
      * (pid_autotune_screen.c / diagnostics_routes.c), so the instant a run
      * STOPS for any reason (converged, self-aborted, or an operator
-     * Cancel), try ONCE to hand the fan back - covers every stop path in
-     * one place, not just whichever UI's own Cancel button happened to be
-     * used. Rejected (fan stays on) while BT is still >= 100C, same
-     * anti-scorch floor as everywhere else in the firmware - that's
-     * expected, not a bug; the operator still has full manual control of
-     * the fan afterward regardless. */
+     * Cancel), try to hand the fan back. The first attempt is commonly
+     * rejected outright (BT still >=100C, same anti-scorch floor as
+     * everywhere else) - previously that rejection was final and the fan
+     * was left running forever with no further attempt. Now it hands off
+     * to the SAME s_fan_off_pending/retry mechanism already used for
+     * post-Cooling profile completion (see its comment above): retried
+     * every tick from the "no active session" branch below until it
+     * succeeds, the operator takes the fan back over themselves, or
+     * FAN_OFF_RETRY_WINDOW_MS expires. */
     if (st.state != PID_AUTOTUNE_RUNNING && st.state != PID_AUTOTUNE_IDLE && !s_autotune_fan_release_attempted) {
         s_autotune_fan_release_attempted = true;
         esp_err_t fan_err = command_dispatcher_set_fan_pct(0, SAFETY_CMD_SOURCE_DISPLAY);
-        ESP_LOGI(TAG, "Autotune stopped - fan release attempt: %s", esp_err_to_name(fan_err));
+        if (fan_err == ESP_OK) {
+            ESP_LOGI(TAG, "Autotune stopped - fan turned off");
+        } else {
+            ESP_LOGI(TAG, "Autotune stopped - fan stays on until BT < 100C; will retry automatically: %s",
+                     esp_err_to_name(fan_err));
+            /* Seed the override-detection baseline to the fan's CURRENT
+             * target (whatever autotune itself forced it to, e.g. 100%) -
+             * s_last_written_fan may otherwise be stale from an unrelated
+             * profile run long before this one, which would make the retry
+             * loop below think the operator changed the fan the very first
+             * time it checks and abandon the retry immediately. */
+            s_last_written_fan = (int)fan_pwm_get_target_pct();
+            s_fan_off_pending = true;
+            s_fan_off_pending_since_ms = now_ms();
+        }
     } else if (st.state == PID_AUTOTUNE_RUNNING) {
         s_autotune_fan_release_attempted = false; /* Reset so the next run's stop also tries this. */
     }

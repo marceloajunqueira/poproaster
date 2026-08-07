@@ -18,10 +18,18 @@ static const char *TAG = "pid_autotune";
 
 #define AUTOTUNE_NOISEBAND_C 1.0f
 
-/* Abort rather than let the run drive into the tunnel thermostat. */
+/* General safety margin so a run can't climb indefinitely if something is
+ * wrong - independent of any specific hardware protector. */
 #define AUTOTUNE_OVERSHOOT_ABORT_C 25.0f
 #define AUTOTUNE_TIMEOUT_S 2400
-#define AUTOTUNE_MAX_PHASES 40
+/* Operator-requested (2026-08-05): a real run (Pu=55.9s measured) took
+ * ~22.5 minutes to finish because it never converged symmetrically and ran
+ * all the way to the old cap of 40 phases. Halving it caps the same
+ * worst case at roughly 20 phases * ~28s (half of Pu) =~ 9-10 minutes,
+ * matching the requested ~10 min target - a well-converging (symmetric)
+ * run still finishes far earlier than this on its own via
+ * has_enough_data()+zc_symmetrical(), this only bounds the WORST case. */
+#define AUTOTUNE_MAX_PHASES 20
 
 /* ESPHome keeps 7 peak samples and needs 3 before it will compute. */
 #define AUTOTUNE_PEAKS_MAX 7
@@ -39,7 +47,9 @@ static float s_setpoint_c;
 static uint8_t s_output_positive_pct;
 static uint8_t s_output_negative_pct;
 static uint8_t s_fan_pct_at_start;
+static uint8_t s_cap_pct_at_start; /* Max Heater Power cap when the run started - see header note. */
 static int64_t s_start_ms;
+static int64_t s_end_ms; /* Frozen the instant the run stops - see get_status()'s elapsed_s. */
 static char s_message[96];
 
 static relay_state_t s_relay_state;
@@ -252,13 +262,19 @@ static pid_autotune_gains_t rule(float kp_f, float ki_f, float kd_f)
 
 static void finish_success(void)
 {
+    s_end_ms = esp_timer_get_time() / 1000;
     float amplitude = mean_oscillation_amplitude();
     if (amplitude <= 0.0f) {
         s_state = PID_AUTOTUNE_FAILED;
         snprintf(s_message, sizeof(s_message), "No usable oscillation amplitude");
         return;
     }
-    float d = ((float)s_output_positive_pct - (float)s_output_negative_pct) / 2.0f;
+    /* Use the REAL delivered duty (after the Max Heater Power cap), not the
+     * nominal relay request - otherwise Ku is computed for a relay swing
+     * that never actually reached the heater whenever a cap is active. */
+    float eff_positive = (float)s_output_positive_pct * (float)s_cap_pct_at_start / 100.0f;
+    float eff_negative = (float)s_output_negative_pct * (float)s_cap_pct_at_start / 100.0f;
+    float d = (eff_positive - eff_negative) / 2.0f;
     s_ku = 4.0f * d / ((float)M_PI * amplitude);
     s_pu_s = mean_oscillation_period_s();
     s_state = PID_AUTOTUNE_SUCCEEDED;
@@ -289,25 +305,27 @@ esp_err_t pid_autotune_start(float setpoint_c, uint8_t output_positive_pct, uint
         return ESP_ERR_INVALID_STATE;
     }
 
-    heater_pid_protector_status_t prot;
-    heater_pid_get_protector_status(&prot);
-    if (prot.ceiling_c > 0.0f && setpoint_c + AUTOTUNE_OVERSHOOT_ABORT_C > prot.ceiling_c) {
-        ESP_LOGW(TAG, "Refusing to start: setpoint %.1f C would swing into the %.1f C protector ceiling",
-                 (double)setpoint_c, (double)prot.ceiling_c);
-        return ESP_ERR_INVALID_STATE;
-    }
-
     s_setpoint_c = setpoint_c;
     s_output_positive_pct = output_positive_pct;
     s_output_negative_pct = output_negative_pct;
     s_fan_pct_at_start = fan_pwm_get_pct();
+    s_cap_pct_at_start = safety_manager_get_max_heater_power_pct();
     s_start_ms = esp_timer_get_time() / 1000;
     s_state = PID_AUTOTUNE_RUNNING;
     snprintf(s_message, sizeof(s_message), "Running");
     reset_detectors();
 
-    ESP_LOGI(TAG, "Autotune started: setpoint %.1f C, relay %u%%/%u%%, fan %u%%", (double)setpoint_c,
-             (unsigned)output_positive_pct, (unsigned)output_negative_pct, (unsigned)s_fan_pct_at_start);
+    ESP_LOGI(TAG, "Autotune started: setpoint %.1f C, relay %u%%/%u%%, fan %u%%, heater cap %u%%",
+             (double)setpoint_c, (unsigned)output_positive_pct, (unsigned)output_negative_pct,
+             (unsigned)s_fan_pct_at_start, (unsigned)s_cap_pct_at_start);
+    if (s_cap_pct_at_start < 100) {
+        uint32_t eff_pct = ((uint32_t)output_positive_pct * s_cap_pct_at_start) / 100;
+        ESP_LOGW(TAG,
+                 "Max Heater Power cap is %u%% - the requested %u%% relay output will actually deliver only "
+                 "%u%% to the heater. The run will still be correct but slower; consider raising the cap to "
+                 "100%% for a faster/cleaner autotune.",
+                 (unsigned)s_cap_pct_at_start, (unsigned)output_positive_pct, (unsigned)eff_pct);
+    }
     return ESP_OK;
 }
 
@@ -316,6 +334,7 @@ void pid_autotune_abort(const char *reason)
     if (s_state != PID_AUTOTUNE_RUNNING) {
         return;
     }
+    s_end_ms = esp_timer_get_time() / 1000;
     s_state = PID_AUTOTUNE_FAILED;
     snprintf(s_message, sizeof(s_message), "%s", (reason != NULL) ? reason : "Aborted");
     ESP_LOGW(TAG, "Autotune aborted: %s", s_message);
@@ -348,17 +367,25 @@ uint8_t pid_autotune_update(float measured_c)
         return 0;
     }
 
-    heater_pid_protector_status_t prot;
-    heater_pid_get_protector_status(&prot);
-    if (prot.open) {
-        pid_autotune_abort("Thermal protector tripped");
-        return 0;
-    }
-
     float error = s_setpoint_c - measured_c;
     uint8_t output = relay_update(error);
     frequency_update(now_ms, error);
     amplitude_update(error, s_relay_state);
+
+    /* Live progress feedback (overwritten below by finish_success()/abort()
+     * if this same tick concludes the run) - tells the operator WHY the
+     * heater reading might look lower than the configured relay output, and
+     * what the run is currently doing, instead of a static "Running" for
+     * the whole duration. */
+    const char *dir = (s_relay_state == RELAY_POSITIVE) ? "Heating" : "Cooling";
+    if (s_cap_pct_at_start < 100) {
+        uint32_t eff_pct = ((uint32_t)s_output_positive_pct * s_cap_pct_at_start) / 100;
+        snprintf(s_message, sizeof(s_message), "%s (BT=%.1fC, target %.1fC) - heater capped %u%%->%u%%", dir,
+                 (double)measured_c, (double)s_setpoint_c, (unsigned)s_output_positive_pct, (unsigned)eff_pct);
+    } else {
+        snprintf(s_message, sizeof(s_message), "%s (BT=%.1fC, target %.1fC)", dir, (double)measured_c,
+                 (double)s_setpoint_c);
+    }
 
     if (has_enough_data() && (zc_symmetrical() || s_phase_count >= AUTOTUNE_MAX_PHASES)) {
         finish_success();
@@ -383,9 +410,22 @@ void pid_autotune_get_status(pid_autotune_status_t *out)
     out->output_positive_pct = s_output_positive_pct;
     out->output_negative_pct = s_output_negative_pct;
     out->fan_pct_at_start = s_fan_pct_at_start;
-    out->elapsed_s = (s_state == PID_AUTOTUNE_IDLE)
-                         ? 0
-                         : (uint32_t)(((esp_timer_get_time() / 1000) - s_start_ms) / 1000);
+    out->heater_power_cap_pct = s_cap_pct_at_start;
+    out->effective_output_positive_pct = (uint8_t)(((uint32_t)s_output_positive_pct * s_cap_pct_at_start) / 100);
+    out->relay_positive = (s_relay_state == RELAY_POSITIVE);
+    out->phase_count_max = AUTOTUNE_MAX_PHASES;
+    /* BUG FIX (operator-reported): elapsed_s used to keep counting against
+     * live time even after the run stopped (SUCCEEDED/FAILED), since it was
+     * always measured against the current clock - freeze it against
+     * s_end_ms once running has actually concluded, same fix shape as
+     * session_state_machine.c's s_ended_at_ms for the roast dashboard timer. */
+    if (s_state == PID_AUTOTUNE_IDLE) {
+        out->elapsed_s = 0;
+    } else if (s_state == PID_AUTOTUNE_RUNNING) {
+        out->elapsed_s = (uint32_t)(((esp_timer_get_time() / 1000) - s_start_ms) / 1000);
+    } else {
+        out->elapsed_s = (uint32_t)((s_end_ms - s_start_ms) / 1000);
+    }
     out->phase_count = s_phase_count;
     out->zc_count = s_zc_count;
     out->ku = s_ku;
@@ -411,6 +451,8 @@ esp_err_t pid_autotune_apply_result(const pid_autotune_gains_t *gains, bool pers
         .ki = gains->ki,
         .kd = gains->kd,
         .hard_overshoot_margin_c = -1.0f,
+        .d_filter_tau_s = -1.0f, /* Autotune doesn't measure this - leave whatever is currently set. */
+        .setpoint_ramp_c_per_s = -1.0f, /* Same - leave whatever is currently set. */
     };
     return heater_pid_set_tuning(&tuning, persist);
 }

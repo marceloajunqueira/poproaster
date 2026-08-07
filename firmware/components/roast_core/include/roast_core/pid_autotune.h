@@ -16,6 +16,16 @@
  * On this roaster the airflow sets the process gain (measured: 64% duty at
  * fan 100% tops out near 140C, the same duty at fan 90% goes far higher), so
  * a tune done at one fan level does not transfer to another.
+ *
+ * IMPORTANT - it is also only valid for whatever Max Heater Power cap
+ * (safety_manager_set_max_heater_power_pct()) was active when the run
+ * started: the relay's requested output_positive_pct is scaled down by that
+ * cap before it ever reaches the SSR (same as every other heater command in
+ * this firmware), so the Ku math uses the REAL, post-cap delivered swing,
+ * not the nominal request. A low cap does not make the result wrong, but it
+ * DOES make the whole run slower (weaker heating => longer oscillation
+ * period) - consider temporarily setting the cap to 100% before running
+ * this for a faster/cleaner tune.
  */
 #pragma once
 
@@ -46,8 +56,12 @@ typedef struct {
     uint8_t output_positive_pct;
     uint8_t output_negative_pct;
     uint8_t fan_pct_at_start;   /* Gains are only valid for this airflow. */
+    uint8_t heater_power_cap_pct;        /* Max Heater Power cap in effect when the run started. */
+    uint8_t effective_output_positive_pct; /* output_positive_pct after that cap - what the heater actually gets. */
+    bool relay_positive;        /* Current relay half-cycle: true=heating, false=cooling/off. */
     uint32_t elapsed_s;
     uint32_t phase_count;       /* Relay direction changes so far. */
+    uint32_t phase_count_max;   /* Hard cap - the run always concludes by this many phases. */
     uint32_t zc_count;          /* Zero crossings recorded. */
     float ku;
     float pu_s;
@@ -65,9 +79,7 @@ typedef struct {
  * setpoint comfortably but not violently.
  *
  * Works standalone - no roast session needs to be started first. Rejected
- * if a run is already active, if the setpoint is above the thermal
- * protector's learned ceiling, or if the fan is below the safety floor -
- * the run must not be the thing that trips the protector.
+ * if a run is already active, or if the fan is below the safety floor.
  */
 esp_err_t pid_autotune_start(float setpoint_c, uint8_t output_positive_pct, uint8_t output_negative_pct);
 

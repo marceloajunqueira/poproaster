@@ -36,9 +36,8 @@ static const char *const kStringsEn[I18N_KEY_COUNT] = {
     [I18N_KEY_BACK] = "Back",
     [I18N_KEY_PID_AUTOTUNE] = "PID Autotune",
     [I18N_KEY_PID_AUTOTUNE_NOTE] =
-        "Raises the fan to full speed, then cycles the heater on/off around 130C for several minutes "
-        "to find PID gains (noisy, temp will swing). Self-aborts on any issue; saves the result "
-        "automatically on success.",
+        "Raises the fan to 100% and cycles the heater near 150C for several minutes to find PID gains "
+        "(noisy, temp will swing). Self-aborts on any issue and saves the result automatically.",
     [I18N_KEY_PID_AUTOTUNE_CONSENT] = "I understand the risks and want to start the autotune",
     [I18N_KEY_PID_AUTOTUNE_START] = "Start",
     [I18N_KEY_PID_AUTOTUNE_CANCEL] = "Cancel",
@@ -48,7 +47,7 @@ static const char *const kStringsEn[I18N_KEY_COUNT] = {
     [I18N_KEY_PID_AUTOTUNE_STATE_FAILED] = "Failed",
     [I18N_KEY_PID_AUTOTUNE_STATUS_IDLE] = "Idle - check the box below, then Start.",
     [I18N_KEY_PID_AUTOTUNE_STATUS_PREPARING] = "Preparing - raising fan to full speed...",
-    [I18N_KEY_PID_AUTOTUNE_STATUS_FMT] = "%s - %us elapsed, %u phases - %s",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_FMT] = "%s - %us elapsed, phase %u/%u - %s",
     [I18N_KEY_PID_AUTOTUNE_START_ERROR_FMT] = "Could not start: %s",
     [I18N_KEY_PID_AUTOTUNE_RESULT_APPLIED_FMT] =
         "Applied automatically (No-Overshoot rule, saved to NVS):\nKp=%.3f Ki=%.4f Kd=%.2f",
@@ -78,9 +77,9 @@ static const char *const kStringsPt[I18N_KEY_COUNT] = {
     [I18N_KEY_BACK] = "Voltar",
     [I18N_KEY_PID_AUTOTUNE] = "Autoajuste PID",
     [I18N_KEY_PID_AUTOTUNE_NOTE] =
-        "Eleva o ventilador ao maximo e liga/desliga o aquecedor perto de 130C por alguns minutos "
-        "para encontrar os ganhos do PID (barulhento, a temperatura vai oscilar). Cancela sozinho "
-        "se algo der errado; salva o resultado automaticamente ao concluir.",
+        "Eleva o ventilador a 100% e liga/desliga o aquecedor perto de 150C por alguns minutos para "
+        "encontrar os ganhos do PID (barulhento, a temperatura vai oscilar). Cancela sozinho se algo "
+        "der errado e salva o resultado automaticamente.",
     [I18N_KEY_PID_AUTOTUNE_CONSENT] = "Estou ciente dos riscos e quero iniciar o autoajuste",
     [I18N_KEY_PID_AUTOTUNE_START] = "Iniciar",
     [I18N_KEY_PID_AUTOTUNE_CANCEL] = "Cancelar",
@@ -90,7 +89,7 @@ static const char *const kStringsPt[I18N_KEY_COUNT] = {
     [I18N_KEY_PID_AUTOTUNE_STATE_FAILED] = "Falhou",
     [I18N_KEY_PID_AUTOTUNE_STATUS_IDLE] = "Ocioso - marque a caixa abaixo e depois toque em Iniciar.",
     [I18N_KEY_PID_AUTOTUNE_STATUS_PREPARING] = "Preparando - elevando o ventilador a velocidade maxima...",
-    [I18N_KEY_PID_AUTOTUNE_STATUS_FMT] = "%s - %us decorridos, %u fases - %s",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_FMT] = "%s - %us decorridos, fase %u/%u - %s",
     [I18N_KEY_PID_AUTOTUNE_START_ERROR_FMT] = "Nao foi possivel iniciar: %s",
     [I18N_KEY_PID_AUTOTUNE_RESULT_APPLIED_FMT] =
         "Aplicado automaticamente (regra Sem Overshoot, salvo na memoria):\nKp=%.3f Ki=%.4f Kd=%.2f",
@@ -120,9 +119,9 @@ static const char *const kStringsEs[I18N_KEY_COUNT] = {
     [I18N_KEY_BACK] = "Volver",
     [I18N_KEY_PID_AUTOTUNE] = "Autoajuste PID",
     [I18N_KEY_PID_AUTOTUNE_NOTE] =
-        "Eleva el ventilador al maximo y enciende/apaga el calentador cerca de 130C por varios "
-        "minutos para encontrar las ganancias del PID (ruidoso, la temperatura oscilara). Se cancela "
-        "solo si algo falla; guarda el resultado automaticamente al finalizar.",
+        "Eleva el ventilador al 100% y enciende/apaga el calentador cerca de 150C por varios minutos "
+        "para encontrar las ganancias del PID (ruidoso, la temperatura oscilara). Se cancela solo si "
+        "algo falla y guarda el resultado automaticamente.",
     [I18N_KEY_PID_AUTOTUNE_CONSENT] = "Soy consciente de los riesgos y quiero iniciar el autoajuste",
     [I18N_KEY_PID_AUTOTUNE_START] = "Iniciar",
     [I18N_KEY_PID_AUTOTUNE_CANCEL] = "Cancelar",
@@ -132,7 +131,7 @@ static const char *const kStringsEs[I18N_KEY_COUNT] = {
     [I18N_KEY_PID_AUTOTUNE_STATE_FAILED] = "Fallido",
     [I18N_KEY_PID_AUTOTUNE_STATUS_IDLE] = "Inactivo - marque la casilla abajo y luego toque Iniciar.",
     [I18N_KEY_PID_AUTOTUNE_STATUS_PREPARING] = "Preparando - elevando el ventilador a velocidad maxima...",
-    [I18N_KEY_PID_AUTOTUNE_STATUS_FMT] = "%s - %us transcurridos, %u fases - %s",
+    [I18N_KEY_PID_AUTOTUNE_STATUS_FMT] = "%s - %us transcurridos, fase %u/%u - %s",
     [I18N_KEY_PID_AUTOTUNE_START_ERROR_FMT] = "No se pudo iniciar: %s",
     [I18N_KEY_PID_AUTOTUNE_RESULT_APPLIED_FMT] =
         "Aplicado automaticamente (regla Sin Sobreimpulso, guardado en memoria):\nKp=%.3f Ki=%.4f Kd=%.2f",
