@@ -50,6 +50,20 @@ typedef struct {
 /** Fills `out` with the internal term breakdown from the most recent heater_pid_update() call. */
 void heater_pid_get_last_debug(heater_pid_debug_t *out);
 
+/**
+ * Remaps a LOGICAL heater duty (0-100%, e.g. straight from heater_pid_update())
+ * onto the PHYSICAL SSR duty that compensates the element's nonlinear real-
+ * world response (see duty_curve_deadzone_pct/duty_curve_gamma above).
+ *
+ * Deliberately only for CLOSED-LOOP callers (Profile-mode segments, Manual
+ * Target Temp) - Step Test and Autotune must keep commanding the EXACT raw
+ * duty the operator/algorithm specified, uncompensated, since both are
+ * open-loop hardware characterization tools whose whole point is to
+ * observe the real plant's response to a KNOWN duty (compensating there
+ * would corrupt the very data needed to tune this compensation curve).
+ */
+uint8_t heater_pid_compensate_duty_pct(uint8_t logical_pct);
+
 /** Live-tunable controller parameters (see heater_pid_set_tuning()). */
 typedef struct {
     float kp;
@@ -82,6 +96,27 @@ typedef struct {
      * step its real thermal lag/mass can't track) rather than just
      * widening the cutoff margin, which would only delay the same crash. */
     float setpoint_ramp_c_per_s;
+    /* Operator-reported (2026-08-07): the heating element's real thermal
+     * response is NOT linear in commanded duty - below ~65% it barely
+     * heats at all (losses to the airstream dominate), then each %
+     * above that gets noticeably more aggressive, i.e. the closed loop
+     * spends most of its 0-100% authority in a near-dead zone and only a
+     * narrow top slice actually does useful, increasingly strong work.
+     * This is why a profile/manual approach can look "slow for a long
+     * time, then suddenly aggressive" even with correct PID gains and
+     * setpoint ramping - the PLANT itself is nonlinear, not just the
+     * control loop. These two fields let heater_pid_compensate_duty_pct()
+     * remap the PID's LOGICAL 0-100% output onto the PHYSICAL SSR duty
+     * that actually produces roughly proportional real heating power:
+     * physical = deadzone_pct + (100-deadzone_pct) * (logical/100)^(1/gamma).
+     * deadzone_pct=0 and gamma=1.0 together are the identity (no
+     * compensation, physical==logical) - the original behavior. First-pass
+     * values below are estimates from operator feedback, not a measured
+     * curve; refine them using the web Diagnostics page's Step Test tool
+     * (hold a few fixed duties and compare real BT rise) once real data is
+     * available. */
+    float duty_curve_deadzone_pct;
+    float duty_curve_gamma;
 } heater_pid_tuning_t;
 
 /**

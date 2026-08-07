@@ -169,14 +169,19 @@ static void drive_heating_segment(uint32_t elapsed_s, uint8_t segment_idx)
      * successfully applied - not merely attempted - so a temporary/
      * expected rejection (e.g. the fan still soft-start ramping toward
      * this exact target) doesn't get misread as an external override on
-     * the very next tick. */
+     * the very next tick. `target_heater` is the PID's LOGICAL want (also
+     * what's logged/compared above); heater_pid_compensate_duty_pct() maps
+     * it onto the PHYSICAL duty that actually produces roughly
+     * proportional heat given the element's nonlinear response (see
+     * heater_pid.h) - only the physical value is ever sent to hardware. */
+    uint8_t physical_heater = heater_pid_compensate_duty_pct(target_heater);
     esp_err_t fan_err = command_dispatcher_set_fan_pct(target_fan, SAFETY_CMD_SOURCE_PROFILE_CURVE);
-    esp_err_t heater_err = command_dispatcher_set_heater_pct(target_heater, SAFETY_CMD_SOURCE_PROFILE_CURVE);
+    esp_err_t heater_err = command_dispatcher_set_heater_pct(physical_heater, SAFETY_CMD_SOURCE_PROFILE_CURVE);
     if (fan_err == ESP_OK) {
         s_last_written_fan = target_fan;
     }
     if (heater_err == ESP_OK) {
-        s_last_written_heater = target_heater;
+        s_last_written_heater = physical_heater;
     }
 }
 
@@ -245,7 +250,10 @@ static void drive_manual_heater(void)
     if (heater_target > 0 && snap.fan_pct < SAFETY_FAN_MIN_PCT_DURING_HEAT) {
         command_dispatcher_set_fan_pct(SAFETY_FAN_MIN_PCT_DURING_HEAT, SAFETY_CMD_SOURCE_DISPLAY);
     }
-    command_dispatcher_set_heater_pct(heater_target, SAFETY_CMD_SOURCE_DISPLAY);
+    /* heater_target is the PID's LOGICAL want (also what's logged below);
+     * see drive_heating_segment()'s comment on heater_pid_compensate_duty_pct() -
+     * only the compensated PHYSICAL duty is ever sent to hardware. */
+    command_dispatcher_set_heater_pct(heater_pid_compensate_duty_pct(heater_target), SAFETY_CMD_SOURCE_DISPLAY);
 
     /* Operator-requested PID tuning log - only while a real target is set
      * (this function runs on EVERY follower tick regardless of session

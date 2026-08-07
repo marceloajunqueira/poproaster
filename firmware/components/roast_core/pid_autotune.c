@@ -453,6 +453,8 @@ esp_err_t pid_autotune_apply_result(const pid_autotune_gains_t *gains, bool pers
         .hard_overshoot_margin_c = -1.0f,
         .d_filter_tau_s = -1.0f, /* Autotune doesn't measure this - leave whatever is currently set. */
         .setpoint_ramp_c_per_s = -1.0f, /* Same - leave whatever is currently set. */
+        .duty_curve_deadzone_pct = -1.0f, /* Same - autotune doesn't measure the duty curve either. */
+        .duty_curve_gamma = -1.0f,
     };
     return heater_pid_set_tuning(&tuning, persist);
 }

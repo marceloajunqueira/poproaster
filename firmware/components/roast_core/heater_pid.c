@@ -3,6 +3,7 @@
  * @brief See header.
  */
 #include <stdbool.h>
+#include <math.h>
 
 #include "esp_log.h"
 #include "nvs.h"
@@ -66,6 +67,15 @@ static const char *TAG = "heater_pid";
  * integral windup. */
 #define PID_SETPOINT_RAMP_DEFAULT_C_PER_S 1.0f
 
+/* Operator-reported (2026-08-07), from hands-on testing: below ~65%
+ * commanded duty the element barely heats at all, then each % above that
+ * gets progressively more aggressive - real physical nonlinearity, not a
+ * control-loop artifact. First-pass estimate only; refine via the web
+ * Diagnostics page's Step Test tool (a few fixed-duty holds, compare real
+ * BT rise) once real data is available - see heater_pid_compensate_duty_pct(). */
+#define DUTY_CURVE_DEADZONE_DEFAULT_PCT 65.0f
+#define DUTY_CURVE_GAMMA_DEFAULT 2.0f
+
 #define PID_NVS_NAMESPACE "roast_cfg"
 #define PID_NVS_KEY_KP "pid_kp"
 #define PID_NVS_KEY_KI "pid_ki"
@@ -73,6 +83,8 @@ static const char *TAG = "heater_pid";
 #define PID_NVS_KEY_MARGIN "pid_margin"
 #define PID_NVS_KEY_D_TAU "pid_dtau"
 #define PID_NVS_KEY_SP_RAMP "pid_spramp"
+#define PID_NVS_KEY_DUTY_DZ "pid_dutydz"
+#define PID_NVS_KEY_DUTY_GAMMA "pid_dutygam"
 
 /* SAFETY BACKSTOP: this drum's BT sensor sits in the circulating air (not
  * on the element itself), so there's a real, significant thermal lag
@@ -106,6 +118,8 @@ static heater_pid_tuning_t s_tuning = {
     .hard_overshoot_margin_c = PID_HARD_OVERSHOOT_MARGIN_DEFAULT_C,
     .d_filter_tau_s = PID_D_FILTER_TAU_DEFAULT_S,
     .setpoint_ramp_c_per_s = PID_SETPOINT_RAMP_DEFAULT_C_PER_S,
+    .duty_curve_deadzone_pct = DUTY_CURVE_DEADZONE_DEFAULT_PCT,
+    .duty_curve_gamma = DUTY_CURVE_GAMMA_DEFAULT,
 };
 
 void heater_pid_reset(void)
@@ -254,6 +268,31 @@ void heater_pid_get_last_debug(heater_pid_debug_t *out)
     }
 }
 
+uint8_t heater_pid_compensate_duty_pct(uint8_t logical_pct)
+{
+    if (logical_pct == 0) {
+        return 0;
+    }
+    float dz = s_tuning.duty_curve_deadzone_pct;
+    if (dz < 0.0f) {
+        dz = 0.0f;
+    } else if (dz > 99.0f) {
+        dz = 99.0f;
+    }
+    float gamma = s_tuning.duty_curve_gamma;
+    if (gamma < 0.1f) {
+        gamma = 0.1f; /* Avoid a division blow-up; effectively "disabled" territory anyway. */
+    }
+    float frac = (float)logical_pct / 100.0f;
+    float physical = dz + (100.0f - dz) * powf(frac, 1.0f / gamma);
+    if (physical > 100.0f) {
+        physical = 100.0f;
+    } else if (physical < 0.0f) {
+        physical = 0.0f;
+    }
+    return (uint8_t)(physical + 0.5f);
+}
+
 void heater_pid_get_tuning(heater_pid_tuning_t *out)
 {
     if (out != NULL) {
@@ -287,16 +326,25 @@ esp_err_t heater_pid_set_tuning(const heater_pid_tuning_t *tuning, bool persist)
     if (tuning->setpoint_ramp_c_per_s >= 0.0f) {
         s_tuning.setpoint_ramp_c_per_s = tuning->setpoint_ramp_c_per_s;
     }
+    if (tuning->duty_curve_deadzone_pct >= 0.0f) {
+        s_tuning.duty_curve_deadzone_pct = tuning->duty_curve_deadzone_pct;
+    }
+    if (tuning->duty_curve_gamma >= 0.0f) {
+        s_tuning.duty_curve_gamma = tuning->duty_curve_gamma;
+    }
 
     /* An integral accumulated under the old gains has no meaning under the
      * new ones - carrying it over would produce a spurious output step right
      * after the change. */
     heater_pid_reset();
 
-    ESP_LOGI(TAG, "PID tuning set: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC d_tau=%.1fs sp_ramp=%.2fC/s%s",
+    ESP_LOGI(TAG,
+             "PID tuning set: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC d_tau=%.1fs sp_ramp=%.2fC/s duty_dz=%.1f%% "
+             "duty_gamma=%.2f%s",
              (double)s_tuning.kp, (double)s_tuning.ki, (double)s_tuning.kd,
              (double)s_tuning.hard_overshoot_margin_c, (double)s_tuning.d_filter_tau_s,
-             (double)s_tuning.setpoint_ramp_c_per_s, persist ? " (persisted)" : "");
+             (double)s_tuning.setpoint_ramp_c_per_s, (double)s_tuning.duty_curve_deadzone_pct,
+             (double)s_tuning.duty_curve_gamma, persist ? " (persisted)" : "");
 
     if (!persist) {
         return ESP_OK;
@@ -316,6 +364,8 @@ esp_err_t heater_pid_set_tuning(const heater_pid_tuning_t *tuning, bool persist)
                  sizeof(s_tuning.hard_overshoot_margin_c));
     nvs_set_blob(nvs, PID_NVS_KEY_D_TAU, &s_tuning.d_filter_tau_s, sizeof(s_tuning.d_filter_tau_s));
     nvs_set_blob(nvs, PID_NVS_KEY_SP_RAMP, &s_tuning.setpoint_ramp_c_per_s, sizeof(s_tuning.setpoint_ramp_c_per_s));
+    nvs_set_blob(nvs, PID_NVS_KEY_DUTY_DZ, &s_tuning.duty_curve_deadzone_pct, sizeof(s_tuning.duty_curve_deadzone_pct));
+    nvs_set_blob(nvs, PID_NVS_KEY_DUTY_GAMMA, &s_tuning.duty_curve_gamma, sizeof(s_tuning.duty_curve_gamma));
     err = nvs_commit(nvs);
     nvs_close(nvs);
     return err;
@@ -345,11 +395,16 @@ esp_err_t heater_pid_load_tuning(void)
     load_float(nvs, PID_NVS_KEY_MARGIN, &s_tuning.hard_overshoot_margin_c);
     load_float(nvs, PID_NVS_KEY_D_TAU, &s_tuning.d_filter_tau_s);
     load_float(nvs, PID_NVS_KEY_SP_RAMP, &s_tuning.setpoint_ramp_c_per_s);
+    load_float(nvs, PID_NVS_KEY_DUTY_DZ, &s_tuning.duty_curve_deadzone_pct);
+    load_float(nvs, PID_NVS_KEY_DUTY_GAMMA, &s_tuning.duty_curve_gamma);
     nvs_close(nvs);
 
-    ESP_LOGI(TAG, "PID tuning loaded: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC d_tau=%.1fs sp_ramp=%.2fC/s",
+    ESP_LOGI(TAG,
+             "PID tuning loaded: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC d_tau=%.1fs sp_ramp=%.2fC/s duty_dz=%.1f%% "
+             "duty_gamma=%.2f",
              (double)s_tuning.kp, (double)s_tuning.ki, (double)s_tuning.kd,
              (double)s_tuning.hard_overshoot_margin_c, (double)s_tuning.d_filter_tau_s,
-             (double)s_tuning.setpoint_ramp_c_per_s);
+             (double)s_tuning.setpoint_ramp_c_per_s, (double)s_tuning.duty_curve_deadzone_pct,
+             (double)s_tuning.duty_curve_gamma);
     return ESP_OK;
 }

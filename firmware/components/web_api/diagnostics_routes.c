@@ -262,13 +262,13 @@ static void send_pid_tuning_section(httpd_req_t *req)
     heater_pid_tuning_t t;
     heater_pid_get_tuning(&t);
 
-    char buf[1536];
+    char buf[2048];
     httpd_resp_send_chunk(req, "<h2>PID Tuning: Live Gains</h2>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req,
                            "<p class='sub'>Applies immediately to the running controller and resets the integral. "
                            "'Apply' is RAM-only (lost on reboot); 'Apply &amp; Save' also persists to NVS. "
                            "API: <code>GET/POST /api/pid_tuning</code> (form fields kp, ki, kd, margin_c, d_tau_s, "
-                           "sp_ramp_c_s).</p>",
+                           "sp_ramp_c_s, duty_dz_pct, duty_gamma).</p>",
                            HTTPD_RESP_USE_STRLEN);
 
     snprintf(buf, sizeof(buf),
@@ -279,19 +279,25 @@ static void send_pid_tuning_section(httpd_req_t *req)
              "<label>Cutoff margin &deg;C <input id='pidMargin' type='number' step='0.5' min='0.5' value='%.2f' style='width:6em'></label>"
              "<label>D filter &tau; s <input id='pidDTau' type='number' step='0.5' min='0' value='%.2f' style='width:6em'></label>"
              "<label>Setpoint ramp &deg;C/s <input id='pidSpRamp' type='number' step='0.1' min='0' value='%.2f' style='width:6em'></label>"
+             "<label>Duty dead zone %% <input id='pidDutyDz' type='number' step='1' min='0' max='99' value='%.1f' style='width:6em'></label>"
+             "<label>Duty curve &gamma; <input id='pidDutyGamma' type='number' step='0.1' min='0.1' value='%.2f' style='width:6em'></label>"
              "</div>"
              "<p class='sub'>D filter &tau;: low-pass filters the derivative term only, to reduce oscillation from "
              "sensor lag/noise amplified by Kd. 0 = no filtering (raw derivative). Setpoint ramp: caps how fast the "
              "internal target can move toward a big jump (Manual Target Temp, PREHEAT) instead of stepping to it "
              "instantly, so the integral doesn't wind up and overshoot on the first approach. 0 = no ramping "
-             "(instant target).</p>"
+             "(instant target). Duty dead zone/curve &gamma;: compensates the heater element's own nonlinear "
+             "response (operator-reported: barely heats below a threshold duty, then gets much more aggressive "
+             "near 100%%) by remapping the PID's logical output onto the physical SSR duty - dead zone 0%% and "
+             "&gamma;=1.0 together disable this (physical=logical). Only affects Profile/Manual closed-loop "
+             "control - Step Test and Autotune always command the exact raw duty requested.</p>"
              "<div class='btnrow'>"
              "<button id='pidTuneApplyBtn'>Apply</button>"
              "<button id='pidTuneSaveBtn'>Apply &amp; Save</button>"
              "<span id='pidTuneStatus' class='sub'></span>"
              "</div>",
              (double)t.kp, (double)t.ki, (double)t.kd, (double)t.hard_overshoot_margin_c, (double)t.d_filter_tau_s,
-             (double)t.setpoint_ramp_c_per_s);
+             (double)t.setpoint_ramp_c_per_s, (double)t.duty_curve_deadzone_pct, (double)t.duty_curve_gamma);
     httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -404,12 +410,14 @@ static esp_err_t diagnostics_get_handler(httpd_req_t *req)
                            "+'&margin_c='+document.getElementById('pidMargin').value"
                            "+'&d_tau_s='+document.getElementById('pidDTau').value"
                            "+'&sp_ramp_c_s='+document.getElementById('pidSpRamp').value"
+                           "+'&duty_dz_pct='+document.getElementById('pidDutyDz').value"
+                           "+'&duty_gamma='+document.getElementById('pidDutyGamma').value"
                            "+(persist?'&persist=1':'');"
                            "fetch('/api/pid_tuning',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b})"
                            ".then(function(r){return r.json();})"
                            ".then(function(j){document.getElementById('pidTuneStatus').textContent="
                            "'Applied: Kp='+j.kp+' Ki='+j.ki+' Kd='+j.kd+' margin='+j.margin_c+' d_tau='+j.d_tau_s"
-                           "+' sp_ramp='+j.sp_ramp_c_s+(persist?' (saved)':'');})"
+                           "+' sp_ramp='+j.sp_ramp_c_s+' duty_dz='+j.duty_dz_pct+' duty_gamma='+j.duty_gamma+(persist?' (saved)':'');})"
                            ".catch(function(){document.getElementById('pidTuneStatus').textContent='Failed';});"
                            "}"
                            "document.getElementById('pidTuneApplyBtn').addEventListener('click',function(){applyTuning(false);});"
@@ -501,8 +509,9 @@ static esp_err_t pid_log_clear_post_handler(httpd_req_t *req)
  * real"): lets gains be read and changed while the roaster is running, so a
  * tuning session iterates in seconds instead of one rebuild+OTA per attempt.
  *
- *   GET  /api/pid_tuning  -> {"kp":1.5,"ki":0.034,"kd":5.3,"margin_c":8.0,"d_tau_s":2.0,"sp_ramp_c_s":1.0}
- *   POST /api/pid_tuning  -> form-encoded kp/ki/kd/margin_c/d_tau_s/sp_ramp_c_s
+ *   GET  /api/pid_tuning  -> {"kp":1.5,"ki":0.034,"kd":5.3,"margin_c":8.0,"d_tau_s":2.0,"sp_ramp_c_s":1.0,
+ *                             "duty_dz_pct":65.0,"duty_gamma":2.0}
+ *   POST /api/pid_tuning  -> form-encoded kp/ki/kd/margin_c/d_tau_s/sp_ramp_c_s/duty_dz_pct/duty_gamma
  *                            (any subset; omitted fields keep their current
  *                            value), plus optional persist=1 to save to NVS.
  */
@@ -511,11 +520,12 @@ static esp_err_t pid_tuning_get_handler(httpd_req_t *req)
     heater_pid_tuning_t t;
     heater_pid_get_tuning(&t);
 
-    char body[192];
+    char body[256];
     snprintf(body, sizeof(body),
-             "{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f,\"margin_c\":%.2f,\"d_tau_s\":%.2f,\"sp_ramp_c_s\":%.2f}",
+             "{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f,\"margin_c\":%.2f,\"d_tau_s\":%.2f,\"sp_ramp_c_s\":%.2f,"
+             "\"duty_dz_pct\":%.1f,\"duty_gamma\":%.2f}",
              (double)t.kp, (double)t.ki, (double)t.kd, (double)t.hard_overshoot_margin_c, (double)t.d_filter_tau_s,
-             (double)t.setpoint_ramp_c_per_s);
+             (double)t.setpoint_ramp_c_per_s, (double)t.duty_curve_deadzone_pct, (double)t.duty_curve_gamma);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -532,7 +542,7 @@ static void parse_float_field(const char *body, const char *key, float *out)
 
 static esp_err_t pid_tuning_post_handler(httpd_req_t *req)
 {
-    char body[192];
+    char body[256];
     int received = httpd_req_recv(req, body, sizeof(body) - 1);
     if (received <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
@@ -543,13 +553,16 @@ static esp_err_t pid_tuning_post_handler(httpd_req_t *req)
     /* Negative sentinels mean "field not supplied" - heater_pid_set_tuning()
      * leaves those gains untouched. */
     heater_pid_tuning_t t = { .kp = -1.0f, .ki = -1.0f, .kd = -1.0f, .hard_overshoot_margin_c = -1.0f,
-                              .d_filter_tau_s = -1.0f, .setpoint_ramp_c_per_s = -1.0f };
+                              .d_filter_tau_s = -1.0f, .setpoint_ramp_c_per_s = -1.0f,
+                              .duty_curve_deadzone_pct = -1.0f, .duty_curve_gamma = -1.0f };
     parse_float_field(body, "kp", &t.kp);
     parse_float_field(body, "ki", &t.ki);
     parse_float_field(body, "kd", &t.kd);
     parse_float_field(body, "margin_c", &t.hard_overshoot_margin_c);
     parse_float_field(body, "d_tau_s", &t.d_filter_tau_s);
     parse_float_field(body, "sp_ramp_c_s", &t.setpoint_ramp_c_per_s);
+    parse_float_field(body, "duty_dz_pct", &t.duty_curve_deadzone_pct);
+    parse_float_field(body, "duty_gamma", &t.duty_curve_gamma);
 
     char persist_param[8] = { 0 };
     bool persist = (httpd_query_key_value(body, "persist", persist_param, sizeof(persist_param)) == ESP_OK) &&
