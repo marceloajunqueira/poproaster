@@ -173,8 +173,12 @@ static void drive_heating_segment(uint32_t elapsed_s, uint8_t segment_idx)
      * what's logged/compared above); heater_pid_compensate_duty_pct() maps
      * it onto the PHYSICAL duty that actually produces roughly
      * proportional heat given the element's nonlinear response (see
-     * heater_pid.h) - only the physical value is ever sent to hardware. */
-    uint8_t physical_heater = heater_pid_compensate_duty_pct(target_heater);
+     * heater_pid.h) - only the physical value is ever sent to hardware.
+     * heater_pid_apply_min_on_floor() then keeps it from ever fully
+     * dropping to 0% (operator-reported: a cold-air blast onto hot beans
+     * hurts the roast) - always applied here since this function only ever
+     * drives a real (non-Cooling) heating segment. */
+    uint8_t physical_heater = heater_pid_apply_min_on_floor(heater_pid_compensate_duty_pct(target_heater));
     esp_err_t fan_err = command_dispatcher_set_fan_pct(target_fan, SAFETY_CMD_SOURCE_PROFILE_CURVE);
     esp_err_t heater_err = command_dispatcher_set_heater_pct(physical_heater, SAFETY_CMD_SOURCE_PROFILE_CURVE);
     if (fan_err == ESP_OK) {
@@ -217,13 +221,14 @@ static void drive_cooling(uint32_t elapsed_s, bool within_profile_cooling_segmen
         return;
     }
 
-    /* Reached only if COOLING was somehow entered outside the profile's own
-     * Cooling segment - not expected in the current design (operator
-     * Cancel/Emergency Stop now abort immediately via session_sm_abort()
-     * instead of routing through COOLING at all), but kept as a defensive
-     * fallback: kick the fan to a fixed safe speed ONCE and then leave it
-     * to the operator (Manual tab) from then on, bounded only by the
-     * SAFETY_FAN_STOP_MIN_TEMP_C hard floor in safety_manager.h. */
+    /* Reached if COOLING was entered outside the profile's own Cooling
+     * segment - either an operator Cancel triggered it early (first press,
+     * see command_dispatcher_cancel_session()) or Emergency Stop aborted
+     * straight past COOLING (which never reaches drive_cooling() at all,
+     * since session_sm_abort() goes directly to ABORTED). Kick the fan to a
+     * fixed safe speed ONCE and then leave it to the operator (Manual tab)
+     * from then on, bounded only by the SAFETY_FAN_STOP_MIN_TEMP_C hard
+     * floor in safety_manager.h. */
     if (!s_fallback_fan_written) {
         command_dispatcher_set_fan_pct(COOLING_FALLBACK_FAN_PCT, SAFETY_CMD_SOURCE_PROFILE_CURVE);
         s_fallback_fan_written = true;
@@ -252,8 +257,15 @@ static void drive_manual_heater(void)
     }
     /* heater_target is the PID's LOGICAL want (also what's logged below);
      * see drive_heating_segment()'s comment on heater_pid_compensate_duty_pct() -
-     * only the compensated PHYSICAL duty is ever sent to hardware. */
-    command_dispatcher_set_heater_pct(heater_pid_compensate_duty_pct(heater_target), SAFETY_CMD_SOURCE_DISPLAY);
+     * only the compensated PHYSICAL duty is ever sent to hardware. The
+     * min-on floor only applies while a real target is actually set - with
+     * no target (s_manual_target_temp_c == 0, the operator's own "Desligar"
+     * state) the heater must still be able to reach true 0%. */
+    uint8_t physical_heater = heater_pid_compensate_duty_pct(heater_target);
+    if (s_manual_target_temp_c > 0.0f) {
+        physical_heater = heater_pid_apply_min_on_floor(physical_heater);
+    }
+    command_dispatcher_set_heater_pct(physical_heater, SAFETY_CMD_SOURCE_DISPLAY);
 
     /* Operator-requested PID tuning log - only while a real target is set
      * (this function runs on EVERY follower tick regardless of session
@@ -548,10 +560,15 @@ static void follower_timer_cb(void *arg)
         return;
     }
 
-    /* phase == ROAST_PHASE_COOLING - only ever reached via the profile's own
-     * trailing Cooling segment now (T038 branch above); operator
-     * Cancel/Emergency Stop abort immediately via session_sm_abort()
-     * instead of routing through COOLING. */
+    /* phase == ROAST_PHASE_COOLING - reached either via the profile's own
+     * trailing Cooling segment (T038 branch above) or an operator Cancel's
+     * first press (command_dispatcher_cancel_session(), before the
+     * profile's real Cooling segment's own time window - so
+     * within_profile_cooling_segment below correctly comes out false in
+     * that case, and should_finish below falls back to temp_safe/failsafe
+     * instead of waiting for the profile's own cooling duration). Emergency
+     * Stop still aborts straight past COOLING entirely via
+     * session_sm_abort(), never reaching here. */
     uint32_t total_s = s_profile_loaded ? roast_profile_total_duration_s(&s_profile) : 0;
     uint8_t segment_idx = (s_profile_loaded && total_s > 0) ? roast_profile_get_segment_index(&s_profile, elapsed_s) : 0;
     bool within_profile_cooling_segment =
@@ -694,4 +711,22 @@ void profile_curve_follower_set_step_test_heater_pct(int pct)
 int profile_curve_follower_get_step_test_heater_pct(void)
 {
     return s_step_test_heater_pct;
+}
+
+esp_err_t profile_curve_follower_skip_to_next_segment(void)
+{
+    if (!s_profile_loaded) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const roast_session_t *session = session_sm_get_state();
+    if (session->phase != ROAST_PHASE_ROASTING && session->phase != ROAST_PHASE_DEVELOPMENT) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint32_t elapsed_s = (uint32_t)(session->elapsed_ms / 1000);
+    uint8_t segment_idx = roast_profile_get_segment_index(&s_profile, elapsed_s);
+    uint32_t boundary_s = roast_profile_get_segment_end_s(&s_profile, segment_idx);
+    if (boundary_s <= elapsed_s) {
+        return ESP_ERR_INVALID_STATE; /* Already at/past the last segment's own end - nothing further to skip to. */
+    }
+    return session_sm_skip_curve_time((int64_t)(boundary_s - elapsed_s) * 1000);
 }

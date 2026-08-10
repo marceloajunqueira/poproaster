@@ -268,7 +268,7 @@ static void refresh_timer_cb(lv_timer_t *timer)
         lv_label_set_text(s_control_note_label, "Session paused - heater control is frozen until resumed.");
     } else {
         lv_label_set_text(s_control_note_label,
-                           "Heater is automatic (PID to Target Temp); fan auto-raises to Level 1 (80%) if needed.");
+                           "Heater is automatic (PID to Target Temp); fan auto-raises to Level 1 (90%) if needed.");
     }
 }
 
@@ -394,7 +394,7 @@ void manual_control_show_in(lv_obj_t *parent)
     lv_obj_add_style(note, &s_style_label, LV_PART_MAIN);
     lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(note, usable_w);
-    lv_label_set_text(note, "Heater is automatic (PID to Target Temp); fan auto-raises to Level 1 (80%) if needed.");
+    lv_label_set_text(note, "Heater is automatic (PID to Target Temp); fan auto-raises to Level 1 (90%) if needed.");
     lv_obj_align(note, LV_ALIGN_TOP_LEFT, margin, 232);
     s_control_note_label = note;
 

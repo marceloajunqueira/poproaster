@@ -34,7 +34,8 @@ typedef struct {
     int heater_pct;
     roast_phase_t phase;
     bool paused;
-    int64_t elapsed_ms;
+    int64_t elapsed_ms;      /* Curve-driving elapsed time, excludes paused time - see session_state_machine.h. */
+    int64_t wall_elapsed_ms; /* Display-only elapsed time, includes paused time - use this for any on-screen/web timer text. */
 } roast_telemetry_snapshot_t;
 
 /** Starts the background sampling timer (500ms period). Call once at boot,

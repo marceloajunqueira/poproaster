@@ -29,17 +29,39 @@ static uint8_t locate_segment(const roast_profile_t *profile, uint32_t elapsed_s
     return 0;
 }
 
-/* Per operator requirement: target temp/fan must transition IMMEDIATELY at
- * a segment boundary (a step function) - NOT ramp/smooth gradually from the
- * previous segment's target over the new segment's duration. Each segment
- * simply holds its own configured target flat for its whole duration. */
+/* Per operator feedback (2026-08-09): segment 0 and the trailing Cooling
+ * segment must both be a flat STEP (instant transition, no ramp) - see the
+ * header's doc comment for the rationale. Only an "interior" segment (not
+ * segment 0, not Cooling) ramps linearly from the PREVIOUS segment's own
+ * target to its own target, over its own duration. */
 float roast_profile_get_target_temp_c(const roast_profile_t *profile, uint32_t elapsed_s)
 {
     if (profile->point_count == 0) {
         return 0.0f;
     }
     uint8_t idx = locate_segment(profile, elapsed_s);
-    return profile->points[idx].target_temp_c;
+    if (idx == 0 || profile->points[idx].is_cooling) {
+        return profile->points[idx].target_temp_c;
+    }
+
+    uint32_t seg_start_s = 0;
+    for (uint8_t i = 0; i < idx; i++) {
+        seg_start_s += profile->points[i].duration_s;
+    }
+    uint32_t dur = profile->points[idx].duration_s;
+    float to = profile->points[idx].target_temp_c;
+    if (dur == 0) {
+        return to;
+    }
+    float from = profile->points[idx - 1].target_temp_c;
+
+    float frac = (float)(elapsed_s - seg_start_s) / (float)dur;
+    if (frac < 0.0f) {
+        frac = 0.0f;
+    } else if (frac > 1.0f) {
+        frac = 1.0f;
+    }
+    return from + (to - from) * frac;
 }
 
 uint8_t roast_profile_get_target_fan_pct(const roast_profile_t *profile, uint32_t elapsed_s)
@@ -57,6 +79,15 @@ uint8_t roast_profile_get_segment_index(const roast_profile_t *profile, uint32_t
         return 0;
     }
     return locate_segment(profile, elapsed_s);
+}
+
+uint32_t roast_profile_get_segment_end_s(const roast_profile_t *profile, uint8_t segment_idx)
+{
+    uint32_t end_s = 0;
+    for (uint8_t i = 0; i <= segment_idx && i < profile->point_count; i++) {
+        end_s += profile->points[i].duration_s;
+    }
+    return end_s;
 }
 
 /* Default duration for an auto-appended/converted mandatory trailing

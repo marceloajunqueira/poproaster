@@ -8,11 +8,28 @@
  *        and the chart's timeline spans exactly the profile's total
  *        duration (sum of every setpoint's duration).
  *
- * Each setpoint is a flat STEP, not a ramp: roast_profile_get_target_*()
- * simply returns whichever segment `elapsed_s` currently falls into's own
- * configured target, held constant for that segment's whole duration - the
- * transition at a segment boundary is immediate (per operator requirement:
- * no smoothing/interpolation between one segment's target and the next).
+ * Operator-reported problem (2026-08-09): holding BT flat for a whole
+ * segment lets internal steam pressure vent/equalize instead of keep
+ * building, which can suppress first crack - matches how real Ramp/Soak
+ * roast controllers (and Artisan's own PID "RS" ramp/soak tables) work.
+ * `roast_profile_get_target_temp_c()` therefore RAMPS interior segments: the
+ * target rises linearly from the previous segment's own target to this
+ * segment's target, over this segment's own duration (0% at the segment's
+ * start, 100% at its end) - so a segment set to the SAME temp as the
+ * previous one is still a flat hold by construction, and two different
+ * values always produce a continuous rise/fall with no plateau.
+ *
+ * EXCEPTIONS, both per further operator feedback the same day - these two
+ * segments are ALWAYS a flat STEP, never ramped:
+ * - Segment 0 has no earlier point to ramp from, and PREHEAT already brings
+ *   BT close to its target before Charge - ramping it anyway made Charge
+ *   look like it "reset" the target back down and slowly re-climbed.
+ * - The trailing Cooling segment: the heater is cut immediately the moment
+ *   Cooling starts (session_sm_start_cooling()) - a ramping target curve
+ *   suggested a gradual, planned cool-down that doesn't reflect reality.
+ *
+ * `roast_profile_get_target_fan_pct()` is unaffected - fan% always steps
+ * instantly at every segment boundary.
  *
  * There is deliberately no configurable heater-power field: the operator
  * only ever picks the target BEAN TEMPERATURE, and the firmware works out
@@ -32,8 +49,8 @@ extern "C" {
 #define ROAST_PROFILE_NAME_MAX_LEN 32
 #define ROAST_PROFILE_MAX_POINTS 20
 
-/** Fan may never drop below this while the heater could be active - normal (non-Cooling) segments must keep target_fan_pct at/above this floor (enforced both by the profile editor UI and, independently, by the Safety Manager at the point commands are actually applied). Matches SAFETY_FAN_MIN_PCT_DURING_HEAT / Level 1 (hal/fan_pwm.h's fan physical minimum operating duty). Fan speed is quantized to 3 discrete levels (80/90/100%, see hal/fan_pwm.h) - this is Level 1's percentage, the lowest non-cooling segments may use. */
-#define ROAST_PROFILE_FAN_MIN_PCT 80
+/** Fan may never drop below this while the heater could be active - normal (non-Cooling) segments must keep target_fan_pct at/above this floor (enforced both by the profile editor UI and, independently, by the Safety Manager at the point commands are actually applied). Matches SAFETY_FAN_MIN_PCT_DURING_HEAT / Level 1 (hal/fan_pwm.h's fan physical minimum operating duty). Fan speed is quantized to 3 discrete levels (90/95/100%, see hal/fan_pwm.h) - this is Level 1's percentage, the lowest non-cooling segments may use. */
+#define ROAST_PROFILE_FAN_MIN_PCT 90
 
 /** Cooling segments always use these two fixed values - not editable/stored as a choice, just implied by is_cooling (see below). */
 #define ROAST_PROFILE_COOLING_TEMP_C 0.0f
@@ -55,7 +72,7 @@ typedef struct {
 /** Sum of every setpoint's duration - the exact total length of the roast this profile describes. */
 uint32_t roast_profile_total_duration_s(const roast_profile_t *profile);
 
-/** Piecewise-linear-interpolated target BT at `elapsed_s` into the profile (clamped to the first/last setpoint's target outside the profile's range). */
+/** Piecewise-linear-ramped target BT at `elapsed_s` into the profile (clamped to the first/last setpoint's target outside the profile's range) - segment 0 and the trailing Cooling segment are always a flat step, see the file doc comment. */
 float roast_profile_get_target_temp_c(const roast_profile_t *profile, uint32_t elapsed_s);
 
 /** Piecewise-linear-interpolated target fan% at `elapsed_s` into the profile (clamped to the first/last setpoint's target outside the profile's range). */
@@ -63,6 +80,9 @@ uint8_t roast_profile_get_target_fan_pct(const roast_profile_t *profile, uint32_
 
 /** Returns the index (0-based) of the setpoint segment `elapsed_s` falls into - used by the T034/T035 curve follower to detect when a manual override should expire (segment boundary crossed). Clamped to the last segment past the profile's total duration. */
 uint8_t roast_profile_get_segment_index(const roast_profile_t *profile, uint32_t elapsed_s);
+
+/** Cumulative duration through and including `segment_idx` (i.e. that segment's own end time) - used by the operator "Next segment" skip. */
+uint32_t roast_profile_get_segment_end_s(const roast_profile_t *profile, uint8_t segment_idx);
 
 /**
  * Per operator requirement: every profile must end with exactly one

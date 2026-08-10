@@ -64,6 +64,21 @@ void heater_pid_get_last_debug(heater_pid_debug_t *out);
  */
 uint8_t heater_pid_compensate_duty_pct(uint8_t logical_pct);
 
+/**
+ * Operator-reported (2026-08-08): letting the heater drop all the way to 0%
+ * physical duty WHILE actively roasting - whether from a well-converged PID
+ * naturally wanting near-zero output, or the hard overshoot cutoff forcing
+ * it - means the fan immediately starts blowing air that's cooling straight
+ * toward ambient onto hot beans, which can visibly hurt the roast (thermal
+ * shock). Clamps `physical_pct` (the value about to be sent to hardware,
+ * AFTER heater_pid_compensate_duty_pct()) up to `min_on_pct` (see
+ * heater_pid_tuning_t) - never below it, only ever raises it. Callers
+ * must only invoke this while genuinely "on" (an active heating target is
+ * set) - during a real "off" state (Manual mode with no target, Cooling)
+ * this must NOT be called, so the heater can still reach true 0%.
+ */
+uint8_t heater_pid_apply_min_on_floor(uint8_t physical_pct);
+
 /** Live-tunable controller parameters (see heater_pid_set_tuning()). */
 typedef struct {
     float kp;
@@ -117,6 +132,21 @@ typedef struct {
      * available. */
     float duty_curve_deadzone_pct;
     float duty_curve_gamma;
+    /* Operator-reported (2026-08-08): a full drop to 0% physical duty while
+     * actively roasting blows cooling-toward-ambient air onto hot beans and
+     * visibly hurts the roast - real hot-air roasters generally keep SOME
+     * minimum warmth flowing rather than a true off/on airflow-temperature
+     * swing. `min_on_pct` is the PHYSICAL SSR duty floor (independent of
+     * duty_curve_deadzone_pct/gamma above, applied by
+     * heater_pid_apply_min_on_floor() AFTER that compensation) enforced
+     * only while a real target is set (Profile heating segments; Manual
+     * Target Temp - but NOT Cooling, and NOT Manual with no target, which
+     * both legitimately need true 0%). Interacts with the separate Max
+     * Heater Power cap (safety_manager.c) exactly like any other heater
+     * request - a very low cap can still scale this floor down further,
+     * same as it scales everything else. First-pass estimate, not yet
+     * measured against real roasts. */
+    float min_on_pct;
 } heater_pid_tuning_t;
 
 /**

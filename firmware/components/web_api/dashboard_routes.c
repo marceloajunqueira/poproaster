@@ -284,12 +284,18 @@ static void ws_broadcast_timer_cb(void *arg)
     int tfan = 0;
     /* TBT should show during PREHEAT too (operator request: preheat now
      * actually heats toward the first setpoint's target - see
-     * profile_curve_follower.c) - held flat at segment 0's target since
-     * PREHEAT has no CHARGE-relative elapsed-time reference yet. */
+     * profile_curve_follower.c). During PREHEAT there's no CHARGE-relative
+     * elapsed time yet, so read segment 0's own target directly (it's a
+     * flat step anyway, see roast_profile.c) instead of elapsed_ms. */
     if ((curve_active || snap.phase == ROAST_PHASE_PREHEAT) && has_profile) {
-        uint32_t elapsed_s = curve_active ? (uint32_t)(snap.elapsed_ms / 1000) : 0;
-        ttemp = roast_profile_get_target_temp_c(&profile, elapsed_s);
-        tfan = roast_profile_get_target_fan_pct(&profile, elapsed_s);
+        if (curve_active) {
+            uint32_t elapsed_s = (uint32_t)(snap.elapsed_ms / 1000);
+            ttemp = roast_profile_get_target_temp_c(&profile, elapsed_s);
+            tfan = roast_profile_get_target_fan_pct(&profile, elapsed_s);
+        } else {
+            ttemp = profile.points[0].target_temp_c;
+            tfan = profile.points[0].target_fan_pct;
+        }
         has_target = true;
     }
 
@@ -343,12 +349,12 @@ static void ws_broadcast_timer_cb(void *arg)
 
     static char json[2200]; /* generous margin above segs(900)+events_json(420)+everything else - see the format-truncation lesson elsewhere in this project */
     snprintf(json, sizeof(json),
-             "{\"phase\":\"%s\",\"mode\":\"%s\",\"paused\":%s,\"elapsedMs\":%lld,"
+             "{\"phase\":\"%s\",\"mode\":\"%s\",\"paused\":%s,\"elapsedMs\":%lld,\"wallElapsedMs\":%lld,"
              "\"bt\":%.1f,\"sensorValid\":%s,\"ror\":%.1f,\"dtr\":%.1f,\"fan\":%d,\"heater\":%d,"
              "\"hasTarget\":%s,\"ttemp\":%.1f,\"tfan\":%d,\"segs\":%s,\"durS\":%lu,\"events\":%s,"
              "\"alarmText\":\"%s\",\"alarmNeedsAck\":%s}",
              phase_str(snap.phase), session->control_mode == ROAST_MODE_PROFILE ? "PROFILE" : "MANUAL",
-             snap.paused ? "true" : "false", (long long)snap.elapsed_ms,
+             snap.paused ? "true" : "false", (long long)snap.elapsed_ms, (long long)snap.wall_elapsed_ms,
              snap.bean_temp_c, snap.sensor_valid ? "true" : "false", snap.ror_c_per_min, snap.dtr_pct,
              snap.fan_pct, snap.heater_pct, has_target ? "true" : "false", ttemp, tfan, segs,
              (unsigned long)duration_s, events_json, needs_ack ? alarm_str(alarm) : "", needs_ack ? "true" : "false");
@@ -425,6 +431,8 @@ static esp_err_t control_post_handler(httpd_req_t *req)
         err = command_dispatcher_resume_session(SAFETY_CMD_SOURCE_WEB);
     } else if (strcmp(action, "cancel") == 0) {
         err = command_dispatcher_cancel_session(SAFETY_CMD_SOURCE_WEB);
+    } else if (strcmp(action, "next_segment") == 0) {
+        err = command_dispatcher_skip_to_next_segment(SAFETY_CMD_SOURCE_WEB);
     } else if (strcmp(action, "emergency_stop") == 0) {
         err = command_dispatcher_emergency_stop(SAFETY_CMD_SOURCE_WEB);
     } else if (strcmp(action, "ack_alarm") == 0) {
@@ -489,10 +497,10 @@ static void send_profile_curve_script(httpd_req_t *req)
     httpd_resp_send_chunk(req, "<script>var profileSegments=[", HTTPD_RESP_USE_STRLEN);
     if (has_profile) {
         for (uint8_t i = 0; i < profile.point_count; i++) {
-            char seg[64];
-            snprintf(seg, sizeof(seg), "%s{\"d\":%lu,\"t\":%.1f,\"f\":%u}", i == 0 ? "" : ",",
+            char seg[72];
+            snprintf(seg, sizeof(seg), "%s{\"d\":%lu,\"t\":%.1f,\"f\":%u,\"c\":%s}", i == 0 ? "" : ",",
                      (unsigned long)profile.points[i].duration_s, (double)profile.points[i].target_temp_c,
-                     (unsigned)profile.points[i].target_fan_pct);
+                     (unsigned)profile.points[i].target_fan_pct, profile.points[i].is_cooling ? "true" : "false");
             httpd_resp_send_chunk(req, seg, HTTPD_RESP_USE_STRLEN);
         }
     }
@@ -530,12 +538,25 @@ static const char *DASHBOARD_SCRIPT =
     "function computeTargetCurve(){"
     "if(typeof profileSegments==='undefined'||profileSegments.length===0){"
     "for(var i=0;i<MAXPTS;i++){ttempData[i]=null;tfanData[i]=null;}return;}"
+    /* Mirrors roast_profile.c's roast_profile_get_target_temp_c(): segment 0
+     * and the trailing Cooling segment are always a flat step; any OTHER
+     * segment ramps linearly from the previous segment's own target to its
+     * own target, over its own duration. Fan stays a step - only temp
+     * ramps. */
     "for(var i=0;i<MAXPTS;i++){"
-    "var t=i*durationS/(MAXPTS-1);var cursor=0,temp=0,fan=0;"
-    "for(var s=0;s<profileSegments.length;s++){var seg=profileSegments[s];"
-    "if(t<cursor+seg.d||s===profileSegments.length-1){temp=seg.t;fan=seg.f;break;}"
-    "cursor+=seg.d;}"
-    "ttempData[i]=temp;tfanData[i]=fan;}"
+    "var t=i*durationS/(MAXPTS-1);var cursor=0,idx=0;"
+    "for(var s=0;s<profileSegments.length;s++){"
+    "var segEnd=cursor+profileSegments[s].d;"
+    "if(t<segEnd||s===profileSegments.length-1){idx=s;break;}"
+    "cursor=segEnd;}"
+    "var seg=profileSegments[idx];"
+    "if(idx===0||seg.c){ttempData[i]=seg.t;tfanData[i]=seg.f;continue;}"
+    "var segStart=0;"
+    "for(var k=0;k<idx;k++){segStart+=profileSegments[k].d;}"
+    "var from=profileSegments[idx-1].t;"
+    "var frac=seg.d>0?(t-segStart)/seg.d:1;if(frac<0)frac=0;if(frac>1)frac=1;"
+    "ttempData[i]=seg.d>0?(from+(seg.t-from)*frac):seg.t;"
+    "tfanData[i]=seg.f;}"
     "}"
     "computeTargetCurve();"
     "var chart=document.getElementById('chart');var ctx=chart.getContext('2d');"
@@ -621,7 +642,7 @@ static const char *DASHBOARD_SCRIPT =
     "if(d.events){eventMarkers=d.events.map(function(e){return {t:e[0],type:e[1]};});}"
     "setText('phase',d.phase+(d.paused?' (PAUSED)':''));"
     "setText('mode',d.mode);"
-    "setText('timer',fmtTime(d.elapsedMs));"
+    "setText('timer',fmtTime(d.wallElapsedMs));"
     "setText('bt',d.sensorValid?d.bt.toFixed(1)+' C':'--');"
     "setText('tbt',(d.hasTarget?d.ttemp.toFixed(1)+' C':'--'));"
     "setText('ror',d.ror.toFixed(1)+' C/min');"
@@ -644,6 +665,9 @@ static const char *DASHBOARD_SCRIPT =
     "document.getElementById('chargeBtn').style.display=preheat?'inline-block':'none';"
     "document.getElementById('activeControls').style.display=(!idleLike&&!preheat)?'inline-flex':'none';"
     "document.getElementById('pauseBtn').textContent=d.paused?'Resume':'Pause';"
+    "document.getElementById('cancelBtn').textContent=(d.phase==='COOLING')?'Finish now':'Cancel';"
+    "document.getElementById('nextBtn').style.display="
+    "((d.phase==='ROASTING'||d.phase==='DEVELOPMENT')&&d.mode==='PROFILE')?'inline-block':'none';"
     "document.getElementById('switchManualBtn').style.display=(!idleLike&&d.mode==='PROFILE')?'inline-block':'none';"
     "}"
     "function connect(){"
@@ -687,6 +711,7 @@ static const char *DASHBOARD_SCRIPT =
     "document.getElementById('pauseBtn').addEventListener('click',function(){"
     "post(this.textContent==='Pause'?'pause':'resume');});"
     "document.getElementById('cancelBtn').addEventListener('click',function(){post('cancel');});"
+    "document.getElementById('nextBtn').addEventListener('click',function(){post('next_segment');});"
     "document.getElementById('estopBtn').addEventListener('click',function(){"
     "if(confirm('Emergency Stop - are you sure?'))post('emergency_stop');});"
     "document.getElementById('ackBtn').addEventListener('click',function(){post('ack_alarm');});"
@@ -769,6 +794,7 @@ void dashboard_routes_send_page(httpd_req_t *req)
                            "<button id='chargeBtn' class='primary' style='display:none'>Charge</button>"
                            "<span id='activeControls' style='display:none;gap:8px;'>"
                            "<button id='pauseBtn'>Pause</button>"
+                           "<button id='nextBtn' style='display:none'>Next</button>"
                            "<button id='cancelBtn' class='danger'>Cancel</button>"
                            "</span>"
                            "<button id='switchManualBtn' style='display:none' class='danger'>Switch to Manual</button>"

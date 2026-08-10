@@ -45,6 +45,7 @@ static stepper_action_t s_actions[MAX_ACTIONS];
 static int s_action_count;
 
 static lv_obj_t *s_parent;
+static lv_obj_t *s_seg_area; /* Scrollable segment list - tracked so rebuild_editor_ui() can restore its scroll position across a full teardown/rebuild. */
 static roast_profile_t s_working;
 static int s_editing_id;
 
@@ -125,6 +126,7 @@ static stepper_action_t *alloc_action(uint8_t seg_idx, field_t field, int16_t de
 static void go_back_to_list(void)
 {
     lv_obj_clean(s_parent);
+    s_seg_area = NULL; /* Destroyed by the lv_obj_clean() above - must not be read as a stale pointer on the next profile_editor_show_in(). */
     profile_list_show_in(s_parent);
 }
 
@@ -448,6 +450,13 @@ static void build_segment_card(lv_obj_t *parent, uint8_t idx, lv_coord_t width)
 static void rebuild_editor_ui(void)
 {
     ensure_styles();
+    /* rebuild_editor_ui() runs on EVERY +/- stepper tap (full lv_obj_clean()
+     * + rebuild) - without this, the segment list always snapped back to
+     * the top, forcing repeated re-scrolling to keep editing a segment
+     * further down the list. s_seg_area still points at the OLD (about to
+     * be destroyed) list here, so read its scroll position before
+     * lv_obj_clean() wipes it. */
+    lv_coord_t saved_scroll_y = (s_seg_area != NULL) ? lv_obj_get_scroll_y(s_seg_area) : 0;
     lv_obj_clean(s_parent);
     s_action_count = 0;
 
@@ -502,6 +511,7 @@ static void rebuild_editor_ui(void)
     lv_obj_set_flex_flow(seg_area, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(seg_area, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(seg_area, 6, LV_PART_MAIN);
+    s_seg_area = seg_area;
 
     for (uint8_t i = 0; i < s_working.point_count; i++) {
         build_segment_card(seg_area, i, row_w);
@@ -528,11 +538,18 @@ static void rebuild_editor_ui(void)
         lv_label_set_text(del_lbl, LV_SYMBOL_TRASH " Delete Profile");
         lv_obj_center(del_lbl);
     }
+
+    /* Restore whatever scroll position the segment list had before this
+     * rebuild - needs layout resolved first so the new scroll range is
+     * known (same lesson as nav_shell_init()'s boot-blank-screen fix). */
+    lv_obj_update_layout(root);
+    lv_obj_scroll_to_y(seg_area, saved_scroll_y, LV_ANIM_OFF);
 }
 
 void profile_editor_show_in(lv_obj_t *parent, int profile_id)
 {
     s_parent = parent;
+    s_seg_area = NULL; /* Fresh entry - no prior scroll position to restore. */
     s_editing_id = profile_id;
 
     if (profile_id < 0 || profile_store_load(profile_id, &s_working) != ESP_OK) {
@@ -541,7 +558,7 @@ void profile_editor_show_in(lv_obj_t *parent, int profile_id)
         strncpy(s_working.name, "New Profile", sizeof(s_working.name) - 1);
         s_working.point_count = 1;
         s_working.points[0] = (roast_profile_point_t){
-            .duration_s = 60, .target_temp_c = 200.0f, .target_fan_pct = 60, .is_cooling = false
+            .duration_s = 60, .target_temp_c = 200.0f, .target_fan_pct = ROAST_PROFILE_FAN_MIN_PCT, .is_cooling = false
         };
     }
     /* Per operator requirement: Cooling is always exactly the last segment -

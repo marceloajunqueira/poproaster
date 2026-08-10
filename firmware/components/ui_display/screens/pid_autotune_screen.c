@@ -120,7 +120,7 @@ static void abort_btn_event_cb(lv_event_t *e)
 
     /* ORDER MATTERS (bug report: "cancelei e o fan continuou ligado" even
      * with BT barely above room temp): safety_manager_request_fan_pct()
-     * rejects ANY fan request below the 80% heating floor - including 0%
+     * rejects ANY fan request below the 90% heating floor - including 0%
      * (off) - while ssr_heater_get_duty_pct() is still > 0. The heater MUST
      * be commanded off first so that check is already satisfied by the
      * time the fan-off request is evaluated; doing it in the other order

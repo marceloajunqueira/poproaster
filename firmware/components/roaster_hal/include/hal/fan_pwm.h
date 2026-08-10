@@ -17,7 +17,7 @@
 #define FAN_PWM_LEVEL_MAX 3
 
 /** The one definition of the level->percent table; see fan_pwm.c for why the band is high and narrow. */
-#define FAN_PWM_LEVEL_PCT_LIST 0, 80, 90, 100
+#define FAN_PWM_LEVEL_PCT_LIST 0, 90, 95, 100
 
 #define FAN_PWM_STRINGIFY_(...) #__VA_ARGS__
 #define FAN_PWM_STRINGIFY(...) FAN_PWM_STRINGIFY_(__VA_ARGS__)
@@ -33,9 +33,9 @@ esp_err_t fan_pwm_init(void);
  *
  * - Operator report: the fan motor only behaves predictably at a handful of
  *   discrete speeds, not arbitrary percentages - any nonzero request is
- *   snapped to the nearest of the 3 fixed levels (80/90/100%, see
+ *   snapped to the nearest of the 3 fixed levels (90/95/100%, see
  *   fan_pwm_level_to_pct()); a request that would round down to "off" is
- *   instead raised to the lowest nonzero level (80%) - a deliberate nonzero
+ *   instead raised to the lowest nonzero level (90%) - a deliberate nonzero
  *   request must never silently become 0%.
  * - Turning the fan ON from a full stop (0 -> nonzero) ramps smoothly to the
  *   target duty over ~2 seconds (soft start, avoids a hard power-supply
@@ -80,13 +80,13 @@ esp_err_t fan_pwm_force_off(void);
 
 /**
  * Converts a discrete fan level (0-FAN_PWM_LEVEL_MAX) to its corresponding
- * PWM percentage: 0=0%, 1=60%, 2=70%, 3=80%, 4=90%, 5=100%. Levels above
+ * PWM percentage: 0=0%, 1=90%, 2=95%, 3=100%. Levels above
  * FAN_PWM_LEVEL_MAX are clamped to it.
  */
 uint8_t fan_pwm_level_to_pct(uint8_t level);
 
 /**
- * Converts a raw percentage to the nearest discrete fan level (0-5) - used
+ * Converts a raw percentage to the nearest discrete fan level (0-FAN_PWM_LEVEL_MAX) - used
  * to display/reconstruct a level from an already-stored/legacy percentage
  * value (e.g. an older profile segment that predates the discrete-level
  * model).

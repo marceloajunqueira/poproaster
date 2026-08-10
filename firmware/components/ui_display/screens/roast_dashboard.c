@@ -96,6 +96,8 @@ static lv_obj_t *s_active_group;
 static lv_obj_t *s_pause_btn;
 static lv_obj_t *s_pause_btn_label;
 static lv_obj_t *s_cancel_btn;
+static lv_obj_t *s_cancel_btn_label;
+static lv_obj_t *s_next_btn;
 
 static lv_timer_t *s_refresh_timer;
 
@@ -859,6 +861,17 @@ static void cancel_btn_event_cb(lv_event_t *e)
     command_dispatcher_cancel_session(SAFETY_CMD_SOURCE_DISPLAY);
 }
 
+/* Operator request: skip the profile curve straight to the next segment's
+ * start (real elapsed timer is unaffected) - lets the operator tell the
+ * firmware "this segment is taking too long" without waiting it out. */
+static void next_btn_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    command_dispatcher_skip_to_next_segment(SAFETY_CMD_SOURCE_DISPLAY);
+}
+
 /* T029: direct fan/heater sliders live in the dedicated Manual tab
  * (screens/manual_control.c) instead of here. */
 
@@ -918,14 +931,21 @@ static void refresh_timer_cb(lv_timer_t *timer)
     if (snap.sensor_valid) {
         if (tbt_visible) {
             /* Target Bean Temperature (TBT): whichever segment the profile
-             * curve is currently in (step transition, no ramp - see
-             * roast_profile.c) - shown alongside the real measured BT so
-             * the operator can see both at a glance. */
-            int64_t tbt_elapsed_s = curve_active ? snap.elapsed_ms / 1000 : 0;
-            if (tbt_elapsed_s < 0) {
-                tbt_elapsed_s = 0;
+             * curve is currently in - shown alongside the real measured BT
+             * so the operator can see both at a glance. During PREHEAT
+             * there's no CHARGE-relative elapsed time yet, so read segment
+             * 0's own target directly (it's a flat step anyway, see
+             * roast_profile.c) instead of the curve-driving elapsed_ms. */
+            float target_temp;
+            if (curve_active) {
+                int64_t tbt_elapsed_s = snap.elapsed_ms / 1000;
+                if (tbt_elapsed_s < 0) {
+                    tbt_elapsed_s = 0;
+                }
+                target_temp = roast_profile_get_target_temp_c(&s_active_profile, (uint32_t)tbt_elapsed_s);
+            } else {
+                target_temp = s_active_profile.points[0].target_temp_c;
             }
-            float target_temp = roast_profile_get_target_temp_c(&s_active_profile, (uint32_t)tbt_elapsed_s);
             snprintf(buf, sizeof(buf), "BT: %.1f C / TBT %.1f C", snap.bean_temp_c, target_temp);
         } else {
             snprintf(buf, sizeof(buf), "BT: %.1f C", snap.bean_temp_c);
@@ -982,14 +1002,22 @@ static void refresh_timer_cb(lv_timer_t *timer)
     if (elapsed_s < 0) {
         elapsed_s = 0;
     }
+    /* Timer TEXT uses wall_elapsed_ms (keeps counting through a Pause, per
+     * operator request, so they can see how much extra time a pause added)
+     * - deliberately separate from `elapsed_s` above, which drives the
+     * chart/curve position below and must stay frozen while paused. */
+    int64_t wall_elapsed_s = snap.wall_elapsed_ms / 1000;
+    if (wall_elapsed_s < 0) {
+        wall_elapsed_s = 0;
+    }
     /* Total only shown for a real preset (s_chart_duration_s is a made-up
      * 20min chart window, not an actual plan, whenever no profile is
      * selected/Manual mode). */
     if (s_has_profile && s_chart_duration_s > 0) {
-        snprintf(buf, sizeof(buf), "%02d:%02d / %02u:%02u", (int)(elapsed_s / 60), (int)(elapsed_s % 60),
+        snprintf(buf, sizeof(buf), "%02d:%02d / %02u:%02u", (int)(wall_elapsed_s / 60), (int)(wall_elapsed_s % 60),
                  (unsigned)(s_chart_duration_s / 60), (unsigned)(s_chart_duration_s % 60));
     } else {
-        snprintf(buf, sizeof(buf), "%02d:%02d", (int)(elapsed_s / 60), (int)(elapsed_s % 60));
+        snprintf(buf, sizeof(buf), "%02d:%02d", (int)(wall_elapsed_s / 60), (int)(wall_elapsed_s % 60));
     }
     lv_label_set_text(s_timer_label, buf);
 
@@ -1035,14 +1063,26 @@ static void refresh_timer_cb(lv_timer_t *timer)
         lv_obj_add_flag(s_active_group, LV_OBJ_FLAG_HIDDEN);
     } else {
         /* ROASTING/DEVELOPMENT/COOLING - all handled automatically now
-         * (profile curve / Cancel-Stop safety cooling), so just Pause/Resume
-         * + Cancel remain available; Cancel while already COOLING simply
-         * marks the eventual outcome as ABORTED instead of COMPLETED
-         * (session_sm_cancel() is idempotent). */
+         * (profile curve / operator Cancel), so Pause/Resume + Cancel + Next
+         * remain available. Cancel is two-stage (server-side, see
+         * command_dispatcher_cancel_session()): its icon here just reflects
+         * which press this will be - LV_SYMBOL_CLOSE (jump to Cooling)
+         * while still ROASTING/DEVELOPMENT, LV_SYMBOL_STOP (finalize now)
+         * once already COOLING. Next only makes sense for a Profile-mode
+         * session that hasn't reached Cooling yet (Manual/Artisan has no
+         * segments to skip). */
         lv_obj_add_flag(s_start_btn, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_charge_group, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_active_group, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(s_pause_btn_label, snap.paused ? LV_SYMBOL_PLAY " Resume" : LV_SYMBOL_PAUSE " Pause");
+        lv_label_set_text(s_cancel_btn_label, snap.phase == ROAST_PHASE_COOLING ? LV_SYMBOL_STOP : LV_SYMBOL_CLOSE);
+        bool show_next =
+            snap.phase != ROAST_PHASE_COOLING && session_sm_get_state()->control_mode == ROAST_MODE_PROFILE;
+        if (show_next) {
+            lv_obj_clear_flag(s_next_btn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_next_btn, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
@@ -1297,7 +1337,7 @@ void roast_dashboard_show_in(lv_obj_t *parent)
      * entirely. An explicit fixed size sidesteps that timing issue. */
     lv_obj_t *active_group = lv_obj_create(row_dtr);
     lv_obj_remove_style_all(active_group);
-    lv_obj_set_size(active_group, 164, 24);
+    lv_obj_set_size(active_group, 204, 24);
     lv_obj_clear_flag(active_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(active_group, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(active_group, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1306,15 +1346,17 @@ void roast_dashboard_show_in(lv_obj_t *parent)
     s_active_group = active_group;
 
     /* Cancel: small, icon-only, neutral grey - discreet on purpose, distinct
-     * from the primary Pause/Resume and the danger-red sidebar E-Stop. */
+     * from the primary Pause/Resume and the danger-red sidebar E-Stop. Icon
+     * itself is swapped between LV_SYMBOL_CLOSE/LV_SYMBOL_STOP in
+     * refresh_timer_cb() to reflect the two-stage Cancel behavior. */
     s_cancel_btn = lv_btn_create(active_group);
     lv_obj_add_style(s_cancel_btn, &s_style_btn_secondary, LV_PART_MAIN);
     lv_obj_set_size(s_cancel_btn, 28, 24);
     lv_obj_add_event_cb(s_cancel_btn, cancel_btn_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *cancel_label = lv_label_create(s_cancel_btn);
-    lv_obj_add_style(cancel_label, &s_style_btn_label, LV_PART_MAIN);
-    lv_label_set_text(cancel_label, LV_SYMBOL_CLOSE);
-    lv_obj_center(cancel_label);
+    s_cancel_btn_label = lv_label_create(s_cancel_btn);
+    lv_obj_add_style(s_cancel_btn_label, &s_style_btn_label, LV_PART_MAIN);
+    lv_label_set_text(s_cancel_btn_label, LV_SYMBOL_CLOSE);
+    lv_obj_center(s_cancel_btn_label);
 
     s_pause_btn = lv_btn_create(active_group);
     lv_obj_add_style(s_pause_btn, &s_style_btn_primary, LV_PART_MAIN);
@@ -1325,12 +1367,26 @@ void roast_dashboard_show_in(lv_obj_t *parent)
     lv_label_set_text(s_pause_btn_label, LV_SYMBOL_PAUSE " Pause");
     lv_obj_center(s_pause_btn_label);
 
+    /* Next: skips the profile curve to the next segment's start (Profile
+     * mode only - hidden once COOLING or in Manual/Artisan, see
+     * refresh_timer_cb()). Small icon-only button, same convention as
+     * Cancel. */
+    s_next_btn = lv_btn_create(active_group);
+    lv_obj_add_style(s_next_btn, &s_style_btn_secondary, LV_PART_MAIN);
+    lv_obj_set_size(s_next_btn, 34, 24);
+    lv_obj_add_event_cb(s_next_btn, next_btn_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *next_label = lv_label_create(s_next_btn);
+    lv_obj_add_style(next_label, &s_style_btn_label, LV_PART_MAIN);
+    lv_label_set_text(next_label, LV_SYMBOL_NEXT);
+    lv_obj_center(next_label);
+
     /* NOTE: no manual Start Cooling/Complete button anymore - cooling now
      * starts automatically (either the profile's own trailing "cooling"
-     * segment(s) via profile_curve_follower.c, or immediately when the
-     * operator cancels/emergency-stops - see session_sm_cancel()) and ends
+     * segment(s) via profile_curve_follower.c, or as the FIRST stage of an
+     * operator Cancel - see command_dispatcher_cancel_session()) and ends
      * automatically too (profile timeline elapsed, BT drops below the safe
-     * threshold, or a failsafe max duration - all in profile_curve_follower.c). */
+     * threshold, a failsafe max duration, or a SECOND Cancel press while
+     * already Cooling - all in profile_curve_follower.c/command_dispatcher.c). */
 
     if (s_refresh_timer != NULL) {
         lv_timer_del(s_refresh_timer);

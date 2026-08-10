@@ -22,6 +22,7 @@ static roast_session_t s_session;
 static int64_t s_pause_started_at_ms = 0;
 static int64_t s_total_paused_ms = 0;
 static int64_t s_ended_at_ms = 0; /* Set when the session reaches COMPLETED/ABORTED, so elapsed_ms freezes instead of counting against live time. */
+static int64_t s_curve_skip_ms = 0; /* Operator "Next segment" skips accumulate here - added to elapsed_ms only, never to wall_elapsed_ms. */
 static esp_timer_handle_t s_snapshot_timer;
 
 static int64_t now_ms(void)
@@ -102,6 +103,7 @@ esp_err_t session_sm_start(roast_control_mode_t mode)
     s_pause_started_at_ms = 0;
     s_total_paused_ms = 0;
     s_ended_at_ms = 0;
+    s_curve_skip_ms = 0;
 
     ESP_LOGI(TAG, "Session '%s' started in %s mode", s_session.session_id,
              mode == ROAST_MODE_PROFILE ? "PROFILE" : "MANUAL_ARTISAN");
@@ -148,6 +150,7 @@ esp_err_t session_sm_confirm_charge(void)
      * matches how Artisan/roast logs conventionally define t=0. */
     s_session.started_at_ms = now_ms();
     s_total_paused_ms = 0;
+    s_curve_skip_ms = 0;
     ESP_LOGI(TAG, "Session '%s' CHARGE confirmed: PREHEAT -> ROASTING", s_session.session_id);
     persist_snapshot();
     return ESP_OK;
@@ -218,23 +221,45 @@ esp_err_t session_sm_set_safety_state(roast_safety_state_t state)
     return ESP_OK;
 }
 
+esp_err_t session_sm_skip_curve_time(int64_t delta_ms)
+{
+    if (delta_ms <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_session.phase != ROAST_PHASE_ROASTING && s_session.phase != ROAST_PHASE_DEVELOPMENT) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_curve_skip_ms += delta_ms;
+    ESP_LOGI(TAG, "Session '%s' curve time skipped forward by %lldms (operator Next segment)", s_session.session_id,
+             (long long)delta_ms);
+    persist_snapshot();
+    return ESP_OK;
+}
+
 const roast_session_t *session_sm_get_state(void)
 {
     /* elapsed_ms excludes time spent paused (FR-001): frozen at the moment a
-     * pause began, resuming from where it left off once resumed. Once the
-     * session reaches a terminal phase (COMPLETED/ABORTED), elapsed_ms also
-     * freezes at s_ended_at_ms instead of continuing to grow against live
-     * wall-clock time. */
+     * pause began, resuming from where it left off once resumed - this is
+     * what drives the profile curve/segment position, so it must NOT tick
+     * during a pause or jump ahead once resumed. wall_elapsed_ms is the
+     * operator-visible counterpart (dashboard/web timer text only): it
+     * keeps ticking through a pause, so the operator can see how much extra
+     * time a pause added to the roast. Both freeze at s_ended_at_ms once the
+     * session reaches a terminal phase (COMPLETED/ABORTED). */
     if (s_session.phase != ROAST_PHASE_IDLE && s_session.started_at_ms > 0) {
+        bool ended = (s_session.phase == ROAST_PHASE_COMPLETED || s_session.phase == ROAST_PHASE_ABORTED);
         int64_t reference_ms;
-        if (s_session.phase == ROAST_PHASE_COMPLETED || s_session.phase == ROAST_PHASE_ABORTED) {
+        if (ended) {
             reference_ms = s_ended_at_ms;
         } else if (s_session.paused) {
             reference_ms = s_pause_started_at_ms;
         } else {
             reference_ms = now_ms();
         }
-        s_session.elapsed_ms = reference_ms - s_session.started_at_ms - s_total_paused_ms;
+        s_session.elapsed_ms = reference_ms - s_session.started_at_ms - s_total_paused_ms + s_curve_skip_ms;
+
+        int64_t wall_reference_ms = ended ? s_ended_at_ms : now_ms();
+        s_session.wall_elapsed_ms = wall_reference_ms - s_session.started_at_ms;
     }
     return &s_session;
 }

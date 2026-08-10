@@ -98,6 +98,19 @@ void profile_curve_follower_set_step_test_heater_pct(int pct);
 /** Returns the currently active step-test duty (0-100), or -1 if the step test is not running - lets the web UI reflect actual state. */
 int profile_curve_follower_get_step_test_heater_pct(void);
 
+/**
+ * Operator-initiated "Next segment" skip: pushes the profile curve's own
+ * timeline forward to the start of the next segment (the real/wall-clock
+ * timer is unaffected - see session_sm_skip_curve_time()). If the current
+ * segment is the last heating one, this naturally lands on the profile's
+ * own trailing Cooling segment, which the existing T038 auto-transition
+ * picks up on the very next tick, same as the timeline naturally running
+ * out. Only valid for a loaded Profile-mode session in ROASTING/DEVELOPMENT
+ * - returns ESP_ERR_INVALID_STATE otherwise (no profile loaded, Manual/
+ * Artisan mode, or wrong phase).
+ */
+esp_err_t profile_curve_follower_skip_to_next_segment(void);
+
 #ifdef __cplusplus
 }
 #endif

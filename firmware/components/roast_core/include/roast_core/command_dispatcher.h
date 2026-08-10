@@ -53,12 +53,27 @@ esp_err_t command_dispatcher_confirm_charge(safety_cmd_source_t source);
 
 /**
  * Operator-initiated cancellation of the active roast (distinct from
- * Emergency Stop: this is a calm, deliberate "abandon this roast and let me
- * start over" action, not a safety trip - it does NOT raise a critical
- * alarm or require acknowledgment). Never gated by control mode/source,
- * same as the other lifecycle-ending commands.
+ * Emergency Stop: this is a calm, deliberate action, not a safety trip - it
+ * does NOT raise a critical alarm or require acknowledgment). Two-stage
+ * ONLY while ROASTING/DEVELOPMENT: the first call transitions to COOLING
+ * (same as the profile's own trailing Cooling segment would) so the
+ * operator can still extend the roast a little before it actually stops;
+ * while already COOLING, the call finalizes the session immediately
+ * (ABORTED) instead of waiting out the rest of the cooling curve. Any OTHER
+ * active phase (PREHEAT) is an immediate hard stop in a single press -
+ * there's no "Cooling" to extend into before Charge. Never gated by control
+ * mode/source.
  */
 esp_err_t command_dispatcher_cancel_session(safety_cmd_source_t source);
+
+/**
+ * Operator-initiated "Next segment" skip (Profile mode only): advances the
+ * profile curve to the next segment's start without affecting the real
+ * elapsed-time display - see profile_curve_follower_skip_to_next_segment().
+ * Subject to the same Profile-mode-Artisan-read-only gate as the other
+ * lifecycle commands.
+ */
+esp_err_t command_dispatcher_skip_to_next_segment(safety_cmd_source_t source);
 
 /**
  * T046: switches an active PROFILE-mode session to MANUAL_ARTISAN

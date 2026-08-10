@@ -169,6 +169,7 @@ static void sample_timer_cb(void *arg)
     s_snapshot.phase = session->phase;
     s_snapshot.paused = session->paused;
     s_snapshot.elapsed_ms = session->elapsed_ms;
+    s_snapshot.wall_elapsed_ms = session->wall_elapsed_ms;
     portEXIT_CRITICAL(&s_lock);
 }
 

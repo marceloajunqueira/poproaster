@@ -76,6 +76,13 @@ static const char *TAG = "heater_pid";
 #define DUTY_CURVE_DEADZONE_DEFAULT_PCT 65.0f
 #define DUTY_CURVE_GAMMA_DEFAULT 2.0f
 
+/* Operator-reported (2026-08-08): a full drop to 0% physical duty while
+ * actively roasting blows cooling-toward-ambient air onto hot beans and
+ * visibly hurts the roast. First-pass estimate - a modest trickle, well
+ * inside the reported ~65% dead zone so it's not itself a meaningful
+ * source of extra heat, just enough that the SSR isn't fully dark. */
+#define PID_MIN_ON_DEFAULT_PCT 20.0f
+
 #define PID_NVS_NAMESPACE "roast_cfg"
 #define PID_NVS_KEY_KP "pid_kp"
 #define PID_NVS_KEY_KI "pid_ki"
@@ -85,6 +92,7 @@ static const char *TAG = "heater_pid";
 #define PID_NVS_KEY_SP_RAMP "pid_spramp"
 #define PID_NVS_KEY_DUTY_DZ "pid_dutydz"
 #define PID_NVS_KEY_DUTY_GAMMA "pid_dutygam"
+#define PID_NVS_KEY_MIN_ON "pid_minon"
 
 /* SAFETY BACKSTOP: this drum's BT sensor sits in the circulating air (not
  * on the element itself), so there's a real, significant thermal lag
@@ -120,6 +128,7 @@ static heater_pid_tuning_t s_tuning = {
     .setpoint_ramp_c_per_s = PID_SETPOINT_RAMP_DEFAULT_C_PER_S,
     .duty_curve_deadzone_pct = DUTY_CURVE_DEADZONE_DEFAULT_PCT,
     .duty_curve_gamma = DUTY_CURVE_GAMMA_DEFAULT,
+    .min_on_pct = PID_MIN_ON_DEFAULT_PCT,
 };
 
 void heater_pid_reset(void)
@@ -293,6 +302,19 @@ uint8_t heater_pid_compensate_duty_pct(uint8_t logical_pct)
     return (uint8_t)(physical + 0.5f);
 }
 
+uint8_t heater_pid_apply_min_on_floor(uint8_t physical_pct)
+{
+    float floor = s_tuning.min_on_pct;
+    if (floor <= 0.0f) {
+        return physical_pct;
+    }
+    if (floor > 100.0f) {
+        floor = 100.0f;
+    }
+    uint8_t floor_pct = (uint8_t)(floor + 0.5f);
+    return (physical_pct < floor_pct) ? floor_pct : physical_pct;
+}
+
 void heater_pid_get_tuning(heater_pid_tuning_t *out)
 {
     if (out != NULL) {
@@ -332,6 +354,9 @@ esp_err_t heater_pid_set_tuning(const heater_pid_tuning_t *tuning, bool persist)
     if (tuning->duty_curve_gamma >= 0.0f) {
         s_tuning.duty_curve_gamma = tuning->duty_curve_gamma;
     }
+    if (tuning->min_on_pct >= 0.0f) {
+        s_tuning.min_on_pct = tuning->min_on_pct;
+    }
 
     /* An integral accumulated under the old gains has no meaning under the
      * new ones - carrying it over would produce a spurious output step right
@@ -340,11 +365,11 @@ esp_err_t heater_pid_set_tuning(const heater_pid_tuning_t *tuning, bool persist)
 
     ESP_LOGI(TAG,
              "PID tuning set: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC d_tau=%.1fs sp_ramp=%.2fC/s duty_dz=%.1f%% "
-             "duty_gamma=%.2f%s",
+             "duty_gamma=%.2f min_on=%.1f%%%s",
              (double)s_tuning.kp, (double)s_tuning.ki, (double)s_tuning.kd,
              (double)s_tuning.hard_overshoot_margin_c, (double)s_tuning.d_filter_tau_s,
              (double)s_tuning.setpoint_ramp_c_per_s, (double)s_tuning.duty_curve_deadzone_pct,
-             (double)s_tuning.duty_curve_gamma, persist ? " (persisted)" : "");
+             (double)s_tuning.duty_curve_gamma, (double)s_tuning.min_on_pct, persist ? " (persisted)" : "");
 
     if (!persist) {
         return ESP_OK;
@@ -366,6 +391,7 @@ esp_err_t heater_pid_set_tuning(const heater_pid_tuning_t *tuning, bool persist)
     nvs_set_blob(nvs, PID_NVS_KEY_SP_RAMP, &s_tuning.setpoint_ramp_c_per_s, sizeof(s_tuning.setpoint_ramp_c_per_s));
     nvs_set_blob(nvs, PID_NVS_KEY_DUTY_DZ, &s_tuning.duty_curve_deadzone_pct, sizeof(s_tuning.duty_curve_deadzone_pct));
     nvs_set_blob(nvs, PID_NVS_KEY_DUTY_GAMMA, &s_tuning.duty_curve_gamma, sizeof(s_tuning.duty_curve_gamma));
+    nvs_set_blob(nvs, PID_NVS_KEY_MIN_ON, &s_tuning.min_on_pct, sizeof(s_tuning.min_on_pct));
     err = nvs_commit(nvs);
     nvs_close(nvs);
     return err;
@@ -397,14 +423,15 @@ esp_err_t heater_pid_load_tuning(void)
     load_float(nvs, PID_NVS_KEY_SP_RAMP, &s_tuning.setpoint_ramp_c_per_s);
     load_float(nvs, PID_NVS_KEY_DUTY_DZ, &s_tuning.duty_curve_deadzone_pct);
     load_float(nvs, PID_NVS_KEY_DUTY_GAMMA, &s_tuning.duty_curve_gamma);
+    load_float(nvs, PID_NVS_KEY_MIN_ON, &s_tuning.min_on_pct);
     nvs_close(nvs);
 
     ESP_LOGI(TAG,
              "PID tuning loaded: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC d_tau=%.1fs sp_ramp=%.2fC/s duty_dz=%.1f%% "
-             "duty_gamma=%.2f",
+             "duty_gamma=%.2f min_on=%.1f%%",
              (double)s_tuning.kp, (double)s_tuning.ki, (double)s_tuning.kd,
              (double)s_tuning.hard_overshoot_margin_c, (double)s_tuning.d_filter_tau_s,
              (double)s_tuning.setpoint_ramp_c_per_s, (double)s_tuning.duty_curve_deadzone_pct,
-             (double)s_tuning.duty_curve_gamma);
+             (double)s_tuning.duty_curve_gamma, (double)s_tuning.min_on_pct);
     return ESP_OK;
 }

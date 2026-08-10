@@ -6,7 +6,7 @@
  * Per the project constitution (Principle I, Safety-First): no component
  * other than this one may command the heater above 0% duty. All hard-fail
  * rules from research.md Decision 4 live here:
- *   1. Heater requires fan >= FAN_MIN_PCT_DURING_HEAT (80%, fixed - this is
+ *   1. Heater requires fan >= FAN_MIN_PCT_DURING_HEAT (90%, fixed - this is
  *      the fan's own physical minimum operating duty / Level 1, see
  *      hal/fan_pwm.h).
  *   2. Absolute temperature cutoff at 240C (warning at 230C).
@@ -35,7 +35,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-#define SAFETY_FAN_MIN_PCT_DURING_HEAT   80    /* Fixed: fan's own physical minimum operating duty / Level 1 (hal/fan_pwm.h) - not configurable. */
+#define SAFETY_FAN_MIN_PCT_DURING_HEAT   90    /* Fixed: fan's own physical minimum operating duty / Level 1 (hal/fan_pwm.h) - not configurable. */
 #define SAFETY_TEMP_WARNING_C            230.0f /* FR-026 */
 #define SAFETY_TEMP_ABSOLUTE_CUTOFF_C    240.0f /* FR-026 */
 #define SAFETY_DEFAULT_MAX_DURATION_MS   (25 * 60 * 1000) /* FR-033 default 25 min. */

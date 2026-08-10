@@ -45,7 +45,8 @@ typedef struct {
     bool paused;             /* Operator-initiated pause (FR-001), distinct from ABORTED. */
     bool mode_switch_used;   /* True once PROFILE -> MANUAL_ARTISAN has happened (irreversible). */
     int64_t started_at_ms;
-    int64_t elapsed_ms;      /* Time-in-roast, excluding time spent paused. */
+    int64_t elapsed_ms;      /* Time-in-roast, excluding time spent paused - drives the profile curve/segment position, see profile_curve_follower.c. */
+    int64_t wall_elapsed_ms; /* Time-in-roast INCLUDING time spent paused - display only (dashboard/web timer), never used to drive the profile curve. */
 } roast_session_t;
 
 esp_err_t session_state_machine_init(void);
@@ -67,15 +68,16 @@ esp_err_t session_sm_resume(void);
  */
 esp_err_t session_sm_confirm_charge(void);
 
-/** Transitions to COOLING (automatically via the profile's own trailing "Cooling" segment(s), see profile_curve_follower.c - there is no manual "Start Cooling" button). */
+/** Transitions to COOLING - automatically via the profile's own trailing "Cooling" segment(s) (see profile_curve_follower.c), or as the first stage of an operator Cancel (see command_dispatcher_cancel_session()) so the roast can still be extended a little before it actually ends. */
 esp_err_t session_sm_start_cooling(void);
 
-/** Finalizes a session that has finished COOLING: always COMPLETED. Called automatically by profile_curve_follower.c once cooling's exit condition is met (profile timeline elapsed, BT below the safe threshold, or a failsafe max duration) - there is no manual "Complete" button. Since operator Cancel/Emergency Stop now abort immediately via session_sm_abort() instead of waiting through COOLING, the only way a session ever reaches COOLING naturally is the profile's own trailing Cooling segment - so this always means a normal finish. */
+/** Finalizes a session that has finished COOLING: always COMPLETED. Called automatically by profile_curve_follower.c once cooling's exit condition is met (profile timeline elapsed, BT below the safe threshold, or a failsafe max duration) - there is no manual "Complete" button (a second operator Cancel press while already COOLING instead finalizes via session_sm_abort(), not this function). */
 esp_err_t session_sm_complete(void);
 
 /**
- * Operator-initiated cancellation (Cancel button) or Emergency Stop of an
- * active roast: immediately transitions to ABORTED (heater forced off,
+ * Operator-initiated cancellation (Cancel button, second press while
+ * already COOLING) or Emergency Stop of an active roast: immediately
+ * transitions to ABORTED (heater forced off,
  * same as any other terminal transition) so the dashboard shows "Start
  * Roast" again right away - it does NOT wait through a COOLING grace
  * period. The fan is deliberately left untouched here (whatever it was
@@ -96,6 +98,16 @@ esp_err_t session_sm_abort(const char *reason);
  * the required operator confirmation flag.
  */
 esp_err_t session_sm_switch_to_manual_artisan(bool operator_confirmed_irreversible);
+
+/**
+ * Operator-initiated "Next segment" skip (profile_curve_follower.c): pushes
+ * the profile curve's own timeline (elapsed_ms, NOT wall_elapsed_ms) forward
+ * by `delta_ms` - the displayed/wall-clock timer is deliberately unaffected,
+ * so the operator can see how much time was actually cut versus the
+ * profile's planned duration. Only valid while ROASTING/DEVELOPMENT; rejects
+ * delta_ms <= 0.
+ */
+esp_err_t session_sm_skip_curve_time(int64_t delta_ms);
 
 esp_err_t session_sm_set_safety_state(roast_safety_state_t state);
 

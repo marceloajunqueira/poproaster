@@ -340,11 +340,13 @@ static esp_err_t history_detail_get_handler(httpd_req_t *req)
      * ttempData/tfanData at CHART_MAX_POINTS resolution to match btData. */
     offset += snprintf(script_buf + offset, sizeof(script_buf) - offset, "var profileSegments=[");
     if (has_profile) {
-        for (uint8_t i = 0; i < meta.profile.point_count && offset < sizeof(script_buf) - 48; i++) {
-            offset += snprintf(script_buf + offset, sizeof(script_buf) - offset, "%s{\"d\":%lu,\"t\":%.1f,\"f\":%u}",
-                               i == 0 ? "" : ",", (unsigned long)meta.profile.points[i].duration_s,
+        for (uint8_t i = 0; i < meta.profile.point_count && offset < sizeof(script_buf) - 64; i++) {
+            offset += snprintf(script_buf + offset, sizeof(script_buf) - offset,
+                               "%s{\"d\":%lu,\"t\":%.1f,\"f\":%u,\"c\":%s}", i == 0 ? "" : ",",
+                               (unsigned long)meta.profile.points[i].duration_s,
                                (double)meta.profile.points[i].target_temp_c,
-                               (unsigned)meta.profile.points[i].target_fan_pct);
+                               (unsigned)meta.profile.points[i].target_fan_pct,
+                               meta.profile.points[i].is_cooling ? "true" : "false");
         }
     }
     offset += snprintf(script_buf + offset, sizeof(script_buf) - offset, "];");
@@ -360,14 +362,28 @@ static esp_err_t history_detail_get_handler(httpd_req_t *req)
                         "var MAXPTS=%d;"
                         "var ttempData=new Array(MAXPTS).fill(null);"
                         "var tfanData=new Array(MAXPTS).fill(null);"
+                        /* Mirrors roast_profile.c's roast_profile_get_target_temp_c():
+                         * segment 0 and the trailing Cooling segment are
+                         * always a flat step; any OTHER segment ramps
+                         * linearly from the previous segment's own target
+                         * to its own target, over its own duration. Fan
+                         * stays a step - only temp ramps. */
                         "function computeTargetCurve(){"
                         "if(!profileSegments||profileSegments.length===0)return;"
                         "for(var i=0;i<MAXPTS;i++){"
-                        "var t=i*durationS/(MAXPTS-1);var cursor=0,temp=0,fan=0;"
-                        "for(var s=0;s<profileSegments.length;s++){var seg=profileSegments[s];"
-                        "if(t<cursor+seg.d||s===profileSegments.length-1){temp=seg.t;fan=seg.f;break;}"
-                        "cursor+=seg.d;}"
-                        "ttempData[i]=temp;tfanData[i]=fan;}"
+                        "var t=i*durationS/(MAXPTS-1);var cursor=0,idx=0;"
+                        "for(var s=0;s<profileSegments.length;s++){"
+                        "var segEnd=cursor+profileSegments[s].d;"
+                        "if(t<segEnd||s===profileSegments.length-1){idx=s;break;}"
+                        "cursor=segEnd;}"
+                        "var seg=profileSegments[idx];"
+                        "if(idx===0||seg.c){ttempData[i]=seg.t;tfanData[i]=seg.f;continue;}"
+                        "var segStart=0;"
+                        "for(var k=0;k<idx;k++){segStart+=profileSegments[k].d;}"
+                        "var from=profileSegments[idx-1].t;"
+                        "var frac=seg.d>0?(t-segStart)/seg.d:1;if(frac<0)frac=0;if(frac>1)frac=1;"
+                        "ttempData[i]=seg.d>0?(from+(seg.t-from)*frac):seg.t;"
+                        "tfanData[i]=seg.f;}"
                         "}"
                         "computeTargetCurve();"
                         "var chart=document.getElementById('chart');var ctx=chart.getContext('2d');"

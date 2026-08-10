@@ -455,6 +455,7 @@ esp_err_t pid_autotune_apply_result(const pid_autotune_gains_t *gains, bool pers
         .setpoint_ramp_c_per_s = -1.0f, /* Same - leave whatever is currently set. */
         .duty_curve_deadzone_pct = -1.0f, /* Same - autotune doesn't measure the duty curve either. */
         .duty_curve_gamma = -1.0f,
+        .min_on_pct = -1.0f, /* Same - leave whatever floor is currently set. */
     };
     return heater_pid_set_tuning(&tuning, persist);
 }

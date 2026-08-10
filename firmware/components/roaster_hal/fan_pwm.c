@@ -13,14 +13,14 @@
 static const char *TAG = "fan_pwm";
 
 /* Operator report: the fan motor only behaves predictably at a handful of
- * discrete speeds, not arbitrary percentages - 0=off, 1..5 map to these
+ * discrete speeds, not arbitrary percentages - 0=off, 1..3 map to these
  * fixed duty values. This is a hardware/motor characteristic, independent
  * of (and lower-bounds) the Safety Manager's own
  * SAFETY_FAN_MIN_PCT_DURING_HEAT floor.
  *
- * The band is deliberately narrow and high (80-100, not the old 60-100):
+ * The band is deliberately narrow and high (90-100, not the old 60-100):
  * a ~100g charge of green, still-wet beans needs near-full airflow to
- * fluidize at all, so the old levels 1-2 (60/70%) were unusable in
+ * fluidize at all, so the old lower levels (60/70/80%) were unusable in
  * practice. Keeping every level strong also halves the step size to 5
  * points, and airflow IS this plant's dominant gain term - measured, the
  * same heater duty settles ~140C at 100% fan but runs away past 194C at
@@ -123,7 +123,7 @@ esp_err_t fan_pwm_set_pct(uint8_t pct)
     if (pct > 0) {
         /* Snap to the nearest discrete level; a deliberate nonzero request
          * must never round down to "off" (level 0), so it's floored at the
-         * lowest nonzero level (80%) instead. */
+         * lowest nonzero level (90%) instead. */
         uint8_t level = fan_pwm_pct_to_level(pct);
         if (level < 1) {
             level = 1;
