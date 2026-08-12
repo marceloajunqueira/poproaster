@@ -13,6 +13,7 @@
 
 #include "roast_core/heater_pid.h"
 #include "roast_core/pid_debug_log.h"
+#include "storage/nvs_store.h"
 
 static const char *TAG = "pid_debug_log";
 
@@ -50,6 +51,7 @@ static const char *TAG = "pid_debug_log";
 #define PID_LOG_QUEUE_LEN 16
 #define PID_LOG_TASK_PRIO 3 /* Deliberately below the HTTP server task (5) so web requests always win. */
 #define PID_LOG_TASK_STACK 3072
+#define PID_LOG_NVS_KEY_ENABLED "pid_log_en"
 
 typedef struct {
     char line[PID_LOG_LINE_MAX];
@@ -58,6 +60,7 @@ typedef struct {
 static QueueHandle_t s_queue;
 static SemaphoreHandle_t s_file_mutex;
 static size_t s_cached_size;
+static bool s_enabled = true; /* Default ON - matches the original always-on behavior until explicitly disabled. */
 
 /* kp/ki/kd are logged on EVERY row (not just once) specifically so a live
  * tuning session via POST /api/pid_tuning is analyzable offline: the gains
@@ -155,6 +158,11 @@ esp_err_t pid_debug_log_init(void)
 
     s_cached_size = read_file_size();
 
+    int32_t enabled_stored = 1;
+    if (nvs_store_get_i32(PID_LOG_NVS_KEY_ENABLED, &enabled_stored) == ESP_OK) {
+        s_enabled = (enabled_stored != 0);
+    }
+
     s_file_mutex = xSemaphoreCreateMutex();
     s_queue = xQueueCreate(PID_LOG_QUEUE_LEN, sizeof(pid_log_entry_t));
     if (s_file_mutex == NULL || s_queue == NULL) {
@@ -166,7 +174,8 @@ esp_err_t pid_debug_log_init(void)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "PID debug log ready at %s (%u bytes)", PID_DEBUG_LOG_PATH, (unsigned)s_cached_size);
+    ESP_LOGI(TAG, "PID debug log ready at %s (%u bytes, %s)", PID_DEBUG_LOG_PATH, (unsigned)s_cached_size,
+             s_enabled ? "enabled" : "disabled");
     return ESP_OK;
 }
 
@@ -174,8 +183,8 @@ void pid_debug_log_record(const char *mode_str, roast_phase_t phase, uint32_t el
                            float measured_temp_c, bool sensor_valid, uint8_t requested_heater_pct,
                            uint8_t applied_heater_pct, uint8_t target_fan_pct, uint8_t real_fan_pct)
 {
-    if (s_queue == NULL) {
-        return; /* Not initialized - best-effort, never affect the control loop. */
+    if (s_queue == NULL || !s_enabled) {
+        return; /* Not initialized, or logging turned off by the operator - never affect the control loop. */
     }
 
     heater_pid_debug_t dbg;
@@ -223,4 +232,16 @@ size_t pid_debug_log_get_size(void)
 {
     /* Served from RAM so the Diagnostics page render never hits the filesystem. */
     return s_cached_size;
+}
+
+void pid_debug_log_set_enabled(bool enabled)
+{
+    s_enabled = enabled;
+    nvs_store_set_i32(PID_LOG_NVS_KEY_ENABLED, enabled ? 1 : 0);
+    ESP_LOGI(TAG, "PID debug log %s", enabled ? "enabled" : "disabled");
+}
+
+bool pid_debug_log_is_enabled(void)
+{
+    return s_enabled;
 }

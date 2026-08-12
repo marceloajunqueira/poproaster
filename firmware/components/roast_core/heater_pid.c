@@ -76,6 +76,16 @@ static const char *TAG = "heater_pid";
 #define DUTY_CURVE_DEADZONE_DEFAULT_PCT 65.0f
 #define DUTY_CURVE_GAMMA_DEFAULT 2.0f
 
+/* Operator-reported (2026-08-12): BT settles a persistent, growing lag
+ * behind the profile's now-ramping target - classic ramp-tracking
+ * ("velocity") error for a feedback-only PID. Derived from the SAME
+ * open-loop step-test model as the Kp/Ki/Kd defaults above: for a
+ * first-order plant dT/dt=(K*duty-T)/tau, tracking a ramp of rate v with
+ * zero steady-state error needs an extra duty of tau*v/K on top of
+ * whatever the feedback terms converge to - tau~=45s, K~=1.86C per 1%
+ * duty -> tau/K ~= 24.2 (% logical duty per C/s of target rate). */
+#define PID_RAMP_FF_DEFAULT_C_PER_CPS 24.2f
+
 /* Operator-reported (2026-08-08): a full drop to 0% physical duty while
  * actively roasting blows cooling-toward-ambient air onto hot beans and
  * visibly hurts the roast. First-pass estimate - a modest trickle, well
@@ -93,6 +103,7 @@ static const char *TAG = "heater_pid";
 #define PID_NVS_KEY_DUTY_DZ "pid_dutydz"
 #define PID_NVS_KEY_DUTY_GAMMA "pid_dutygam"
 #define PID_NVS_KEY_MIN_ON "pid_minon"
+#define PID_NVS_KEY_FF "pid_ff"
 
 /* SAFETY BACKSTOP: this drum's BT sensor sits in the circulating air (not
  * on the element itself), so there's a real, significant thermal lag
@@ -117,6 +128,8 @@ static bool s_has_prev;
 static float s_d_filtered; /* Low-pass-filtered rate of change, used ONLY for the D term - see PID_D_FILTER_TAU_DEFAULT_S. */
 static float s_ramped_target_c; /* Internal setpoint, advanced toward the real target at a bounded rate - see PID_SETPOINT_RAMP_DEFAULT_C_PER_S. */
 static bool s_ramp_has_value;
+static float s_prev_target_c; /* Previous tick's RAW (pre-internal-ramp) target - used only to derive the ramp-feedforward rate. */
+static bool s_has_prev_target;
 static heater_pid_debug_t s_last_debug;
 
 static heater_pid_tuning_t s_tuning = {
@@ -129,6 +142,7 @@ static heater_pid_tuning_t s_tuning = {
     .duty_curve_deadzone_pct = DUTY_CURVE_DEADZONE_DEFAULT_PCT,
     .duty_curve_gamma = DUTY_CURVE_GAMMA_DEFAULT,
     .min_on_pct = PID_MIN_ON_DEFAULT_PCT,
+    .ramp_feedforward_gain = PID_RAMP_FF_DEFAULT_C_PER_CPS,
 };
 
 void heater_pid_reset(void)
@@ -138,6 +152,7 @@ void heater_pid_reset(void)
     s_has_prev = false;
     s_d_filtered = 0.0f; /* Re-seeded from the first real rate sample below, like s_prev_measured_c. */
     s_ramp_has_value = false; /* Re-seeded from the current measurement on the next update() call. */
+    s_has_prev_target = false; /* Re-seeded from the first target on the next update() call. */
 }
 
 uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s)
@@ -152,6 +167,16 @@ uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s
     bool had_prev = s_has_prev;
     s_prev_measured_c = measured_temp_c;
     s_has_prev = true;
+
+    /* Ramp feedforward's rate term - differentiate the RAW incoming target
+     * (not the internally-ramped one below) tick-to-tick, so it reflects
+     * what the profile/operator actually wants, not this function's own
+     * anti-overshoot smoothing. Computed unconditionally, same as
+     * d_measured above, so it stays continuous through a hard cutoff. */
+    float d_target_c_per_s = s_has_prev_target ? (target_temp_c - s_prev_target_c) / dt_s : 0.0f;
+    s_prev_target_c = target_temp_c;
+    s_has_prev_target = true;
+    float ff_term = s_tuning.ramp_feedforward_gain * d_target_c_per_s;
 
     /* First-order low-pass filter of the rate, used ONLY by the D term
      * below. tau_s=0 makes alpha=1, i.e. the filtered value equals the raw
@@ -210,6 +235,7 @@ uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s
         s_last_debug.i_term = 0.0f;
         s_last_debug.d_term = 0.0f;
         s_last_debug.raw_output = 0.0f;
+        s_last_debug.ff_term = 0.0f;
         s_last_debug.hard_cutoff = true;
         return 0;
     }
@@ -250,7 +276,7 @@ uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s
     }
     s_integral = integral_candidate;
 
-    float unclamped_output = p_term + i_term + d_term;
+    float unclamped_output = p_term + i_term + d_term + ff_term;
 
     float output = unclamped_output;
     if (output > PID_OUTPUT_MAX) {
@@ -265,6 +291,7 @@ uint8_t heater_pid_update(float target_temp_c, float measured_temp_c, float dt_s
     s_last_debug.i_term = i_term;
     s_last_debug.d_term = d_term;
     s_last_debug.raw_output = unclamped_output;
+    s_last_debug.ff_term = ff_term;
     s_last_debug.hard_cutoff = false;
 
     return (uint8_t)(output + 0.5f);
@@ -304,6 +331,18 @@ uint8_t heater_pid_compensate_duty_pct(uint8_t logical_pct)
 
 uint8_t heater_pid_apply_min_on_floor(uint8_t physical_pct)
 {
+    /* Per operator requirement: the heater must NEVER go fully dark while
+     * actively roasting, INCLUDING during the hard overshoot cutoff above -
+     * a full 0% blows air that's cooling straight toward ambient onto hot
+     * beans and can ruin the roast. The cutoff dropping to min_on_pct
+     * (not 0%) still delivers meaningfully cooler air than whatever it was
+     * running before, which is what actually brings BT back down safely -
+     * it just doesn't (and must never) go all the way to a cold-air blast.
+     * The ~45s of continued rise seen in logs/pid_debug_11.csv right after
+     * a cutoff fired is this plant's own real thermal lag/coasting (dead
+     * time ~7s, tau ~45s - see the Kp/Ki/Kd derivation above) still
+     * absorbing residual heat at the reduced duty, not evidence the floor
+     * is fighting the cutoff. */
     float floor = s_tuning.min_on_pct;
     if (floor <= 0.0f) {
         return physical_pct;
@@ -357,6 +396,9 @@ esp_err_t heater_pid_set_tuning(const heater_pid_tuning_t *tuning, bool persist)
     if (tuning->min_on_pct >= 0.0f) {
         s_tuning.min_on_pct = tuning->min_on_pct;
     }
+    if (tuning->ramp_feedforward_gain >= 0.0f) {
+        s_tuning.ramp_feedforward_gain = tuning->ramp_feedforward_gain;
+    }
 
     /* An integral accumulated under the old gains has no meaning under the
      * new ones - carrying it over would produce a spurious output step right
@@ -365,11 +407,12 @@ esp_err_t heater_pid_set_tuning(const heater_pid_tuning_t *tuning, bool persist)
 
     ESP_LOGI(TAG,
              "PID tuning set: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC d_tau=%.1fs sp_ramp=%.2fC/s duty_dz=%.1f%% "
-             "duty_gamma=%.2f min_on=%.1f%%%s",
+             "duty_gamma=%.2f min_on=%.1f%% ramp_ff=%.2f%s",
              (double)s_tuning.kp, (double)s_tuning.ki, (double)s_tuning.kd,
              (double)s_tuning.hard_overshoot_margin_c, (double)s_tuning.d_filter_tau_s,
              (double)s_tuning.setpoint_ramp_c_per_s, (double)s_tuning.duty_curve_deadzone_pct,
-             (double)s_tuning.duty_curve_gamma, (double)s_tuning.min_on_pct, persist ? " (persisted)" : "");
+             (double)s_tuning.duty_curve_gamma, (double)s_tuning.min_on_pct, (double)s_tuning.ramp_feedforward_gain,
+             persist ? " (persisted)" : "");
 
     if (!persist) {
         return ESP_OK;
@@ -392,6 +435,7 @@ esp_err_t heater_pid_set_tuning(const heater_pid_tuning_t *tuning, bool persist)
     nvs_set_blob(nvs, PID_NVS_KEY_DUTY_DZ, &s_tuning.duty_curve_deadzone_pct, sizeof(s_tuning.duty_curve_deadzone_pct));
     nvs_set_blob(nvs, PID_NVS_KEY_DUTY_GAMMA, &s_tuning.duty_curve_gamma, sizeof(s_tuning.duty_curve_gamma));
     nvs_set_blob(nvs, PID_NVS_KEY_MIN_ON, &s_tuning.min_on_pct, sizeof(s_tuning.min_on_pct));
+    nvs_set_blob(nvs, PID_NVS_KEY_FF, &s_tuning.ramp_feedforward_gain, sizeof(s_tuning.ramp_feedforward_gain));
     err = nvs_commit(nvs);
     nvs_close(nvs);
     return err;
@@ -424,14 +468,15 @@ esp_err_t heater_pid_load_tuning(void)
     load_float(nvs, PID_NVS_KEY_DUTY_DZ, &s_tuning.duty_curve_deadzone_pct);
     load_float(nvs, PID_NVS_KEY_DUTY_GAMMA, &s_tuning.duty_curve_gamma);
     load_float(nvs, PID_NVS_KEY_MIN_ON, &s_tuning.min_on_pct);
+    load_float(nvs, PID_NVS_KEY_FF, &s_tuning.ramp_feedforward_gain);
     nvs_close(nvs);
 
     ESP_LOGI(TAG,
              "PID tuning loaded: Kp=%.4f Ki=%.4f Kd=%.4f margin=%.1fC d_tau=%.1fs sp_ramp=%.2fC/s duty_dz=%.1f%% "
-             "duty_gamma=%.2f min_on=%.1f%%",
+             "duty_gamma=%.2f min_on=%.1f%% ramp_ff=%.2f",
              (double)s_tuning.kp, (double)s_tuning.ki, (double)s_tuning.kd,
              (double)s_tuning.hard_overshoot_margin_c, (double)s_tuning.d_filter_tau_s,
              (double)s_tuning.setpoint_ramp_c_per_s, (double)s_tuning.duty_curve_deadzone_pct,
-             (double)s_tuning.duty_curve_gamma, (double)s_tuning.min_on_pct);
+             (double)s_tuning.duty_curve_gamma, (double)s_tuning.min_on_pct, (double)s_tuning.ramp_feedforward_gain);
     return ESP_OK;
 }

@@ -44,6 +44,7 @@ typedef struct {
     float i_term;       /* Integral contribution (PID_KI * integral). */
     float d_term;        /* Derivative contribution. */
     float raw_output;    /* Unclamped p+i+d sum before the [0,100] clamp. */
+    float ff_term;       /* Ramp-feedforward contribution already included in raw_output - see heater_pid_tuning_t.ramp_feedforward_gain. */
     bool hard_cutoff;    /* True if this call hit the hard overshoot cutoff (forced to 0). */
 } heater_pid_debug_t;
 
@@ -72,10 +73,17 @@ uint8_t heater_pid_compensate_duty_pct(uint8_t logical_pct);
  * toward ambient onto hot beans, which can visibly hurt the roast (thermal
  * shock). Clamps `physical_pct` (the value about to be sent to hardware,
  * AFTER heater_pid_compensate_duty_pct()) up to `min_on_pct` (see
- * heater_pid_tuning_t) - never below it, only ever raises it. Callers
- * must only invoke this while genuinely "on" (an active heating target is
- * set) - during a real "off" state (Manual mode with no target, Cooling)
- * this must NOT be called, so the heater can still reach true 0%.
+ * heater_pid_tuning_t) - never below it, only ever raises it, INCLUDING
+ * during the hard overshoot cutoff: dropping to the configured minimum
+ * (not fully dark) still blows meaningfully cooler air than whatever was
+ * running before, which is what safely brings BT back down - a full 0%
+ * must never happen while actively roasting, no exceptions. (A period of
+ * continued BT rise right after a cutoff fires, before it turns around, is
+ * this plant's own real thermal lag/coasting at the reduced duty - not a
+ * sign the floor needs to be bypassed.) Callers must only invoke this
+ * while genuinely "on" (an active heating target is set) - during a real
+ * "off" state (Manual mode with no target, Cooling) this must NOT be
+ * called, so the heater can still reach true 0%.
  */
 uint8_t heater_pid_apply_min_on_floor(uint8_t physical_pct);
 
@@ -147,6 +155,24 @@ typedef struct {
      * same as it scales everything else. First-pass estimate, not yet
      * measured against real roasts. */
     float min_on_pct;
+    /* Operator-reported (2026-08-12): once the profile's target curve
+     * actually RAMPS between segments (see roast_profile.c), measured BT
+     * settles a persistent 5-10C (growing with temperature) BEHIND the
+     * ramping target - classic ramp-tracking ("velocity") lag: a plain
+     * P+I+D loop with no feedforward can track a STEP with zero
+     * steady-state error, but a continuously MOVING target always leaves
+     * some residual error, roughly proportional to how fast the target is
+     * rising. Standard fix: feed forward the EXTRA duty needed just to
+     * keep pace with the ramp, on top of whatever the feedback terms are
+     * already doing, so the loop doesn't have to rely on error alone (and
+     * therefore lag) to discover it needs more heat. `ramp_feedforward_gain`
+     * is LOGICAL duty % per C/s of target rate
+     * (heater_pid_update() differentiates its own `target_temp_c` input
+     * tick-to-tick to get that rate); default derived from the same
+     * open-loop step-test model as the Kp/Ki/Kd defaults above
+     * (tau~=45s, K~=1.86C per 1% duty -> tau/K ~= 24.2). 0 disables
+     * feedforward entirely (the original feedback-only behavior). */
+    float ramp_feedforward_gain;
 } heater_pid_tuning_t;
 
 /**

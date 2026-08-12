@@ -206,17 +206,27 @@ static void send_pid_log_section(httpd_req_t *req)
     size_t bytes = pid_debug_log_get_size();
     snprintf(val, sizeof(val), "%u KB", (unsigned)((bytes + 512) / 1024));
     send_stat_row(req, "Current size", val);
+    send_stat_row(req, "Logging", pid_debug_log_is_enabled() ? "Enabled" : "Disabled");
 
     httpd_resp_send_chunk(req, "</table>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req,
                            "<p class='sub'>Records every heater PID cycle (target/measured temp, P/I/D terms, "
                            "fan and heater duty) in Profile and Manual mode while a real target temperature is "
-                           "set - CSV, one row per follower tick (~1/s).</p>"
-                           "<div class='btnrow'>"
-                           "<a href='/api/pid_log/download'><button>Download CSV</button></a>"
-                           "<button id='pidLogClearBtn' class='danger'>Clear Log</button>"
-                           "</div>",
+                           "set - CSV, one row per follower tick (~1/s). Turn logging off once tuning has "
+                           "stabilized to avoid unnecessary flash writes across many future roasts - the setting "
+                           "survives a reboot.</p>",
                            HTTPD_RESP_USE_STRLEN);
+
+    bool enabled = pid_debug_log_is_enabled();
+    char toggle_btn[128];
+    snprintf(toggle_btn, sizeof(toggle_btn), "<button id='pidLogToggleBtn' data-enabled='%d'>%s</button>",
+             enabled ? 1 : 0, enabled ? "Disable Logging" : "Enable Logging");
+    httpd_resp_send_chunk(req, "<div class='btnrow'>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "<a href='/api/pid_log/download'><button>Download CSV</button></a>",
+                           HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "<button id='pidLogClearBtn' class='danger'>Clear Log</button>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, toggle_btn, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
 }
 
 /* Operator-requested PID tuning aid: an open-loop step-response test -
@@ -268,7 +278,7 @@ static void send_pid_tuning_section(httpd_req_t *req)
                            "<p class='sub'>Applies immediately to the running controller and resets the integral. "
                            "'Apply' is RAM-only (lost on reboot); 'Apply &amp; Save' also persists to NVS. "
                            "API: <code>GET/POST /api/pid_tuning</code> (form fields kp, ki, kd, margin_c, d_tau_s, "
-                           "sp_ramp_c_s, duty_dz_pct, duty_gamma, min_on_pct).</p>",
+                           "sp_ramp_c_s, duty_dz_pct, duty_gamma, min_on_pct, ff_gain).</p>",
                            HTTPD_RESP_USE_STRLEN);
 
     snprintf(buf, sizeof(buf),
@@ -282,6 +292,7 @@ static void send_pid_tuning_section(httpd_req_t *req)
              "<label>Duty dead zone %% <input id='pidDutyDz' type='number' step='1' min='0' max='99' value='%.1f' style='width:6em'></label>"
              "<label>Duty curve &gamma; <input id='pidDutyGamma' type='number' step='0.1' min='0.1' value='%.2f' style='width:6em'></label>"
              "<label>Min heater %% (while on) <input id='pidMinOn' type='number' step='1' min='0' max='100' value='%.1f' style='width:6em'></label>"
+             "<label>Ramp feedforward %%/(&deg;C/s) <input id='pidRampFf' type='number' step='0.5' min='0' value='%.2f' style='width:6em'></label>"
              "</div>"
              "<p class='sub'>D filter &tau;: low-pass filters the derivative term only, to reduce oscillation from "
              "sensor lag/noise amplified by Kd. 0 = no filtering (raw derivative). Setpoint ramp: caps how fast the "
@@ -295,7 +306,12 @@ static void send_pid_tuning_section(httpd_req_t *req)
              "on): the physical duty is never allowed below this while actively roasting (Profile segments, or "
              "Manual with a Target Temp set) - operator-reported: dropping all the way to 0%% blows air that's "
              "cooling toward ambient onto hot beans and visibly hurts the roast. 0 = disabled (can reach true 0%%). "
-             "Does NOT apply when the heater is genuinely off (Manual with no target, Cooling).</p>"
+             "Does NOT apply when the heater is genuinely off (Manual with no target, Cooling). Ramp feedforward: "
+             "extra LOGICAL duty added per &deg;C/s the target is currently rising (differentiated from the target "
+             "passed into the controller each tick) - a plain feedback PID always lags behind a continuously "
+             "moving target (bigger lag at a faster ramp rate); this adds the estimated extra heat needed to keep "
+             "pace instead of waiting for a growing error to reveal it. 0 = disabled (feedback-only, the original "
+             "behavior).</p>"
              "<div class='btnrow'>"
              "<button id='pidTuneApplyBtn'>Apply</button>"
              "<button id='pidTuneSaveBtn'>Apply &amp; Save</button>"
@@ -303,7 +319,7 @@ static void send_pid_tuning_section(httpd_req_t *req)
              "</div>",
              (double)t.kp, (double)t.ki, (double)t.kd, (double)t.hard_overshoot_margin_c, (double)t.d_filter_tau_s,
              (double)t.setpoint_ramp_c_per_s, (double)t.duty_curve_deadzone_pct, (double)t.duty_curve_gamma,
-             (double)t.min_on_pct);
+             (double)t.min_on_pct, (double)t.ramp_feedforward_gain);
     httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -395,6 +411,11 @@ static esp_err_t diagnostics_get_handler(httpd_req_t *req)
                            "if(!confirm('Clear the PID tuning log?'))return;"
                            "fetch('/api/pid_log/clear',{method:'POST'}).then(function(){location.reload();});"
                            "});"
+                           "document.getElementById('pidLogToggleBtn').addEventListener('click',function(){"
+                           "var next=document.getElementById('pidLogToggleBtn').getAttribute('data-enabled')==='1'?0:1;"
+                           "fetch('/api/pid_log/enable',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+                           "body:'enabled='+next}).then(function(){location.reload();});"
+                           "});"
                            "function postControl(action,value){"
                            "return fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
                            "body:'action='+action+'&value='+value});"
@@ -419,13 +440,14 @@ static esp_err_t diagnostics_get_handler(httpd_req_t *req)
                            "+'&duty_dz_pct='+document.getElementById('pidDutyDz').value"
                            "+'&duty_gamma='+document.getElementById('pidDutyGamma').value"
                            "+'&min_on_pct='+document.getElementById('pidMinOn').value"
+                           "+'&ff_gain='+document.getElementById('pidRampFf').value"
                            "+(persist?'&persist=1':'');"
                            "fetch('/api/pid_tuning',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b})"
                            ".then(function(r){return r.json();})"
                            ".then(function(j){document.getElementById('pidTuneStatus').textContent="
                            "'Applied: Kp='+j.kp+' Ki='+j.ki+' Kd='+j.kd+' margin='+j.margin_c+' d_tau='+j.d_tau_s"
                            "+' sp_ramp='+j.sp_ramp_c_s+' duty_dz='+j.duty_dz_pct+' duty_gamma='+j.duty_gamma"
-                           "+' min_on='+j.min_on_pct+(persist?' (saved)':'');})"
+                           "+' min_on='+j.min_on_pct+' ramp_ff='+j.ff_gain+(persist?' (saved)':'');})"
                            ".catch(function(){document.getElementById('pidTuneStatus').textContent='Failed';});"
                            "}"
                            "document.getElementById('pidTuneApplyBtn').addEventListener('click',function(){applyTuning(false);});"
@@ -512,14 +534,35 @@ static esp_err_t pid_log_clear_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/** Form-encoded `enabled=0|1` toggles whether pid_debug_log_record() writes anything at all - persisted, survives a reboot. */
+static esp_err_t pid_log_enable_post_handler(httpd_req_t *req)
+{
+    char body[16] = { 0 };
+    int received = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    char param[4] = { 0 };
+    bool enabled = (httpd_query_key_value(body, "enabled", param, sizeof(param)) == ESP_OK) &&
+                   (strcmp(param, "1") == 0);
+    pid_debug_log_set_enabled(enabled);
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, enabled ? "enabled" : "disabled", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
 /* Operator-requested live PID tuning API ("pode criar uma API para poder
  * acessar localmente para capturar o log e alterar os parametros em tempo
  * real"): lets gains be read and changed while the roaster is running, so a
  * tuning session iterates in seconds instead of one rebuild+OTA per attempt.
  *
  *   GET  /api/pid_tuning  -> {"kp":1.5,"ki":0.034,"kd":5.3,"margin_c":8.0,"d_tau_s":2.0,"sp_ramp_c_s":1.0,
- *                             "duty_dz_pct":65.0,"duty_gamma":2.0,"min_on_pct":20.0}
- *   POST /api/pid_tuning  -> form-encoded kp/ki/kd/margin_c/d_tau_s/sp_ramp_c_s/duty_dz_pct/duty_gamma/min_on_pct
+ *                             "duty_dz_pct":65.0,"duty_gamma":2.0,"min_on_pct":20.0,"ff_gain":24.2}
+ *   POST /api/pid_tuning  -> form-encoded kp/ki/kd/margin_c/d_tau_s/sp_ramp_c_s/duty_dz_pct/duty_gamma/min_on_pct/ff_gain
  *                            (any subset; omitted fields keep their current
  *                            value), plus optional persist=1 to save to NVS.
  */
@@ -531,10 +574,10 @@ static esp_err_t pid_tuning_get_handler(httpd_req_t *req)
     char body[320];
     snprintf(body, sizeof(body),
              "{\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.4f,\"margin_c\":%.2f,\"d_tau_s\":%.2f,\"sp_ramp_c_s\":%.2f,"
-             "\"duty_dz_pct\":%.1f,\"duty_gamma\":%.2f,\"min_on_pct\":%.1f}",
+             "\"duty_dz_pct\":%.1f,\"duty_gamma\":%.2f,\"min_on_pct\":%.1f,\"ff_gain\":%.2f}",
              (double)t.kp, (double)t.ki, (double)t.kd, (double)t.hard_overshoot_margin_c, (double)t.d_filter_tau_s,
              (double)t.setpoint_ramp_c_per_s, (double)t.duty_curve_deadzone_pct, (double)t.duty_curve_gamma,
-             (double)t.min_on_pct);
+             (double)t.min_on_pct, (double)t.ramp_feedforward_gain);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -563,7 +606,8 @@ static esp_err_t pid_tuning_post_handler(httpd_req_t *req)
      * leaves those gains untouched. */
     heater_pid_tuning_t t = { .kp = -1.0f, .ki = -1.0f, .kd = -1.0f, .hard_overshoot_margin_c = -1.0f,
                               .d_filter_tau_s = -1.0f, .setpoint_ramp_c_per_s = -1.0f,
-                              .duty_curve_deadzone_pct = -1.0f, .duty_curve_gamma = -1.0f, .min_on_pct = -1.0f };
+                              .duty_curve_deadzone_pct = -1.0f, .duty_curve_gamma = -1.0f, .min_on_pct = -1.0f,
+                              .ramp_feedforward_gain = -1.0f };
     parse_float_field(body, "kp", &t.kp);
     parse_float_field(body, "ki", &t.ki);
     parse_float_field(body, "kd", &t.kd);
@@ -573,6 +617,7 @@ static esp_err_t pid_tuning_post_handler(httpd_req_t *req)
     parse_float_field(body, "duty_dz_pct", &t.duty_curve_deadzone_pct);
     parse_float_field(body, "duty_gamma", &t.duty_curve_gamma);
     parse_float_field(body, "min_on_pct", &t.min_on_pct);
+    parse_float_field(body, "ff_gain", &t.ramp_feedforward_gain);
 
     char persist_param[8] = { 0 };
     bool persist = (httpd_query_key_value(body, "persist", persist_param, sizeof(persist_param)) == ESP_OK) &&
@@ -681,6 +726,12 @@ esp_err_t diagnostics_routes_register(httpd_handle_t server)
 
     httpd_uri_t clear_uri = { .uri = "/api/pid_log/clear", .method = HTTP_POST, .handler = pid_log_clear_post_handler };
     err = httpd_register_uri_handler(server, &clear_uri);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    httpd_uri_t enable_uri = { .uri = "/api/pid_log/enable", .method = HTTP_POST, .handler = pid_log_enable_post_handler };
+    err = httpd_register_uri_handler(server, &enable_uri);
     if (err != ESP_OK) {
         return err;
     }

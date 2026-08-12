@@ -46,6 +46,19 @@ esp_err_t pid_debug_log_clear(void);
 /** Returns the current log file size in bytes (0 if it doesn't exist yet) - for showing on the Diagnostics page. */
 size_t pid_debug_log_get_size(void);
 
+/**
+ * Operator-requested (2026-08-12): once tuning has stabilized, many
+ * subsequent roasts would otherwise keep writing this log for no reason -
+ * lets logging be turned off entirely (pid_debug_log_record() becomes a
+ * no-op) without losing the ability to turn it back on for a future tuning
+ * session. Persisted to NVS immediately, so the setting survives a reboot
+ * and stays off across every future roast until explicitly re-enabled.
+ */
+void pid_debug_log_set_enabled(bool enabled);
+
+/** Returns whether logging is currently enabled (defaults to true, matching the original always-on behavior, until the operator disables it). */
+bool pid_debug_log_is_enabled(void);
+
 #ifdef __cplusplus
 }
 #endif
