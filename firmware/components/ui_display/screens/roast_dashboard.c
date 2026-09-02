@@ -52,6 +52,40 @@ static roast_profile_t s_active_profile;
 static bool s_has_profile = false;
 static int s_last_known_selected_id = -2; /* sentinel distinct from -1 ("no preset selected") so the very first tick always syncs. */
 
+/* Loads whichever profile the dashboard should draw its dashed target
+ * curve/timeline from. A roast that has already started (active OR just
+ * finished, i.e. phase != IDLE) MUST use the frozen per-roast snapshot
+ * (session_meta_t.profile, captured once at Start Roast time) - the exact
+ * same source Roast History uses (session_review.c) - never whatever is
+ * CURRENTLY selected in profile_store. Without this, re-showing this tab
+ * (e.g. after checking another tab) once the operator has since edited or
+ * switched the selected preset would silently redraw a COMPLETED roast's
+ * target curve/timeline using the NEW profile data, desyncing it from both
+ * the already-plotted actual points and from Roast History's own
+ * (correctly frozen) rendering of that exact same roast - previously
+ * reported as the History and live charts "rendering differently" for the
+ * same roast. Only a genuinely IDLE session (nothing to show yet) previews
+ * the currently-selected preset, for starting the NEXT roast. */
+static void load_display_profile(void)
+{
+    const roast_session_t *session = session_sm_get_state();
+    s_has_profile = false;
+    if (session->phase != ROAST_PHASE_IDLE && session->session_id[0] != '\0') {
+        session_meta_t meta;
+        if (session_store_load_meta(session->session_id, &meta) == ESP_OK && meta.has_profile) {
+            s_active_profile = meta.profile;
+            s_has_profile = true;
+        }
+    }
+    if (!s_has_profile) {
+        s_has_profile = (profile_store_get_selected(&s_active_profile) == ESP_OK);
+    }
+    s_chart_duration_s = s_has_profile ? roast_profile_total_duration_s(&s_active_profile) : 0;
+    if (s_chart_duration_s == 0) {
+        s_chart_duration_s = DEFAULT_CHART_DURATION_S;
+    }
+}
+
 /* T056/T065: vertical reference-line markers for operator-marked roast
  * events (Turning Point, Dry End, First/Second Crack, Drop, Cool Start,
  * Note). One lv_line (full chart height, thin, solid, distinct purple) +
@@ -787,9 +821,21 @@ static bool phase_is_idle_like(roast_phase_t phase)
  * reflected here until the tab was left and re-entered. Only called while
  * idle (see refresh_timer_cb) - profile_store now refuses a preset switch
  * during an active roast (profile_store_set_selected()), so this can never
- * fire mid-roast and disrupt an in-progress curve. */
+ * fire mid-roast and disrupt an in-progress curve.
+ *
+ * IMPORTANT: gated to phase==IDLE ONLY (not merely phase_is_idle_like(),
+ * which also includes COMPLETED/ABORTED) - a COMPLETED/ABORTED session is
+ * still showing ITS OWN frozen curve (see load_display_profile()'s doc
+ * comment); letting a preset edit/switch elsewhere reach in here too would
+ * re-point that already-finished roast's target overlay at a different (or
+ * since-edited) profile mid-view. */
 static void sync_selected_profile_if_changed(void)
 {
+    const roast_session_t *session = session_sm_get_state();
+    if (session->phase != ROAST_PHASE_IDLE) {
+        return;
+    }
+
     int selected_id = -1;
     profile_store_get_selected_id(&selected_id);
     if (selected_id == s_last_known_selected_id) {
@@ -797,11 +843,7 @@ static void sync_selected_profile_if_changed(void)
     }
     s_last_known_selected_id = selected_id;
 
-    s_has_profile = (profile_store_get_selected(&s_active_profile) == ESP_OK);
-    s_chart_duration_s = s_has_profile ? roast_profile_total_duration_s(&s_active_profile) : 0;
-    if (s_chart_duration_s == 0) {
-        s_chart_duration_s = DEFAULT_CHART_DURATION_S;
-    }
+    load_display_profile();
     if (s_preset_label != NULL) {
         lv_label_set_text(s_preset_label, s_has_profile ? s_active_profile.name : "No preset selected");
     }
@@ -1108,16 +1150,13 @@ void roast_dashboard_show_in(lv_obj_t *parent)
     const lv_coord_t content_w = lv_obj_get_width(parent);
     const lv_coord_t content_h = lv_obj_get_height(parent);
 
-    /* Load whichever preset is currently selected (Presets tab) - the Roast
-     * screen always runs the selected preset: its target BT/Fan curves are
-     * what get plotted (dashed) against the live measured values, and the
-     * chart's timeline spans exactly its total duration. Falls back to a
-     * generic 20-minute window with no target overlay if none is selected. */
-    s_has_profile = (profile_store_get_selected(&s_active_profile) == ESP_OK);
-    s_chart_duration_s = s_has_profile ? roast_profile_total_duration_s(&s_active_profile) : 0;
-    if (s_chart_duration_s == 0) {
-        s_chart_duration_s = DEFAULT_CHART_DURATION_S;
-    }
+    /* Load whichever profile this tab should draw its dashed target
+     * overlay/timeline from - see load_display_profile()'s doc comment for
+     * why an already-started (active or just-completed/aborted) session
+     * must use ITS OWN frozen snapshot instead of whatever preset happens
+     * to be currently selected. Falls back to a generic 20-minute window
+     * with no target overlay if nothing is available either way. */
+    load_display_profile();
     profile_store_get_selected_id(&s_last_known_selected_id); /* Keeps sync_selected_profile_if_changed() from redundantly reloading on the very next idle tick. */
 
     /* Root column: preset name + chart (grows to fill whatever space isn't
