@@ -32,6 +32,14 @@ perfis de torra e acompanhamento em tempo real.
 
 ## Gravar o firmware
 
+Os binários ficam em [Releases](https://github.com/marceloajunqueira/poproaster/releases)
+(criadas ao publicar uma tag `vX.Y.Z`, ex.: `git tag v0.1.0 && git push origin v0.1.0`):
+
+- `pop_roaster-full.bin`: imagem completa, para gravar no offset `0x0` (primeira instalação).
+- `pop_roaster-ota.bin`: só o app, para atualização por OTA.
+
+Os binários de cada build também ficam como artifact na execução do workflow.
+
 Sem instalar nada: abra a página do flasher em
 <https://marceloajunqueira.github.io/poproaster/> (Chrome ou Edge), conecte o
 display por USB e clique em **Instalar firmware**. A página é publicada
