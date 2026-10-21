@@ -33,6 +33,10 @@ jobs:
           esp_idf_version: v6.0
           target: esp32s3
           path: firmware
+          # The "new versions available" check also evaluates lvgl 9.x rules
+          # (LV_USE_LIBPNG, ...) that don't exist in lvgl 8.x Kconfig and
+          # aborts the configure step with a clean component cache.
+          extra_docker_args: -e IDF_COMPONENT_CHECK_NEW_VERSION=0
 
       - name: Prepare flasher site
         run: |
