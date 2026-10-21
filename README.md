@@ -30,5 +30,13 @@ perfis de torra e acompanhamento em tempo real.
 - Camadas de segurança: corte automático por temperatura, watchdog de
   duração da torra, detecção de falha de sensor/ventoinha, etc.
 
+## Gravar o firmware
+
+Sem instalar nada: abra a página do flasher em
+<https://marceloajunqueira.github.io/poproaster/> (Chrome ou Edge), conecte o
+display por USB e clique em **Instalar firmware**. A página é publicada
+automaticamente pelo workflow [`firmware.yml`](.github/workflows/firmware.yml)
+a cada alteração em `firmware/` na branch `main`.
+
 Mais detalhes técnicos (build, pinagem, etc.) estão em
 [`firmware/README.md`](firmware/README.md).

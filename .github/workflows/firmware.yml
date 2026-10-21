@@ -1,0 +1,99 @@
+name: Firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "firmware/**"
+      - "flasher/**"
+      - ".github/workflows/firmware.yml"
+  pull_request:
+    paths:
+      - "firmware/**"
+      - "flasher/**"
+      - ".github/workflows/firmware.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (ESP-IDF v6.0, esp32s3)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0
+          target: esp32s3
+          path: firmware
+
+      - name: Prepare flasher site
+        run: |
+          set -euo pipefail
+          B=firmware/build
+          S=site
+          # Offsets in the manifest below must match flasher_args.json
+          jq -e '.flash_files == {
+            "0x0": "bootloader/bootloader.bin",
+            "0x8000": "partition_table/partition-table.bin",
+            "0xf000": "ota_data_initial.bin",
+            "0x20000": "pop_roaster.bin"
+          }' "$B/flasher_args.json"
+          mkdir -p "$S/firmware"
+          sudo chown -R "$USER" "$B"
+          cp "$B/bootloader/bootloader.bin" \
+             "$B/partition_table/partition-table.bin" \
+             "$B/ota_data_initial.bin" \
+             "$B/pop_roaster.bin" \
+             "$S/firmware/"
+          cp flasher/index.html "$S/"
+          jq -n --arg v "${GITHUB_SHA::7}" '{
+            name: "Pop Roaster",
+            version: $v,
+            new_install_prompt_erase: false,
+            builds: [{
+              chipFamily: "ESP32-S3",
+              parts: [
+                {path: "firmware/bootloader.bin",       offset: 0},
+                {path: "firmware/partition-table.bin",  offset: 32768},
+                {path: "firmware/ota_data_initial.bin", offset: 61440},
+                {path: "firmware/pop_roaster.bin",      offset: 131072}
+              ]
+            }]
+          }' > "$S/manifest.json"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pop_roaster-firmware
+          path: |
+            site/firmware/*.bin
+            site/manifest.json
+            firmware/build/flasher_args.json
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy-pages:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

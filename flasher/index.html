@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pop Roaster - Flasher</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 36rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
+    h1 { margin-bottom: .25rem; }
+    .warn { background: #fff4e5; border-left: 4px solid #f59e0b; padding: .5rem 1rem; display: inline-block; }
+    code { background: #eee; padding: 0 .25rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>Pop Roaster</h1>
+  <p>Instale o firmware direto do navegador, sem precisar de nenhuma ferramenta.</p>
+
+  <esp-web-install-button manifest="manifest.json">
+    <button slot="activate">Instalar firmware</button>
+    <span slot="unsupported" class="warn">
+      Seu navegador não suporta Web Serial. Use Chrome ou Edge no computador.
+    </span>
+    <span slot="not-allowed" class="warn">
+      A instalação exige HTTPS.
+    </span>
+  </esp-web-install-button>
+
+  <h2>Como usar</h2>
+  <ol>
+    <li>Conecte o display JC4827W543 ao computador por USB.</li>
+    <li>Clique em <strong>Instalar firmware</strong> e escolha a porta serial.</li>
+    <li>Aguarde a gravação terminar e o equipamento reiniciar.</li>
+  </ol>
+  <p>Se a porta não aparecer, segure o botão <code>BOOT</code> ao conectar o cabo.</p>
+  <p>Depois de instalado, as próximas atualizações podem ser feitas por OTA.</p>
+  <p><a href="https://github.com/marceloajunqueira/poproaster">Código-fonte no GitHub</a></p>
+</body>
+</html>
