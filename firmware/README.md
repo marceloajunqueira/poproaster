@@ -39,6 +39,22 @@ Flash size is 4MB (`CONFIG_ESPTOOLPY_FLASHSIZE_4MB`, already set in
 1.5MB each) plus a LittleFS `storage` partition (~896KB) for roast session
 history.
 
+## Bill of materials (BOM)
+
+![Pop Roaster BOM](../images/bom.jpg)
+
+| Item | Qty | Notes |
+|------|-----|-------|
+| Guition JC4827W543 board (ESP32-S3, 4.3" display) | 1 | Main controller |
+| MAX6675 module + K-type thermocouple | 1 | Bean temperature sensor |
+| Ceramic capacitor 100nF | 1 | Soldered across the thermocouple input pads of the MAX6675 module, to stabilize the reading |
+| 40A SSR module | 1 | Heating element control |
+| Fan MOSFET module | 1 | Fan motor PWM control |
+| Step-down Mini560 (5V output) | 1 | Fed by the 24V power supply; supplies 5V to the board's P1 connector (+5V/GND) |
+| JST1.25 4-pin connectors/cables | 3 | P1, P2, P4 |
+| Fiberglass motorcycle exhaust heat wrap kit | 1 | Insulates the heater mechanism from the metal housing; the kit's own 2 metal clamps secure the wrap |
+| Thin aluminum tape | 1 | Covers the heat wrap to block IR heat radiation |
+
 ## Hardware wiring
 
 ### Display & touch (fixed, on-board — no wiring needed)
@@ -90,23 +106,136 @@ fan RPM feedback): IO6, IO7, IO15, IO16 (all of unused P3), IO18 (P4).
 > supply voltage, and the ESP32-S3's GPIOs are not 5V-tolerant. Running the
 > sensor at 3.3V keeps the SO signal at a safe voltage for `IO46`.
 
+> **Thermocouple note:** solder a **100nF ceramic capacitor** across the
+> thermocouple input pads (T+ / T-) of the MAX6675 module to stabilize the
+> reading.
+
+#### Power and wiring notes (as built)
+
+- **24V power supply:** feeds the Mini560 step-down (which generates the 5V
+  for the board's P1) and the XY-MOS module, which in turn drives the fan.
+- **MAX6675:** powered with the **3.3V** that comes out of the display board.
+  It is connected with a **5-wire ribbon cable**: 3.3V, GND and the GPIOs
+  (SCK, CS, SO) come straight from the display board.
+- **SSR:** powered from the **GND terminal of the 24V supply**, plus the
+  control GPIO.
+- **XY-MOS (fan):** already has GND on its input terminal, so only the
+  **control GPIO** is soldered to it.
+- **Fan motor:** in the original roaster the motor ran in series with the
+  heating resistance, which dropped the voltage down to ~24V, and a
+  4-diode bridge rectifier turned that into DC. The 4 diodes were **removed**
+  and the **+ and - outputs of the XY-MOS were soldered directly to the
+  motor**.
+
+> **Original thermostat — must be removed:** the thermostat that ships with
+> the original roaster trips at **180°C**. It must be **completely removed**,
+> otherwise it will cut the heater mid-roast and the roasting process will
+> fail.
+
+#### Thermal insulation
+
+After the whole assembly was finished, the entire heater mechanism was
+wrapped in a **fiberglass motorcycle exhaust heat wrap**, to keep the heat
+from spreading to the metal housing. The wrap was then covered with a thin
+**aluminum tape**, to block IR heat radiation. These heat wrap kits come
+with their own metal clamps; 2 of them were used to secure the wrap.
+
 ### Wiring summary
 
+Complete wiring as built (all grounds are common):
+
+![Pop Roaster wiring diagram](docs/wiring-diagram.svg)
+
 ```mermaid
-graph LR
-    ESP32S3["ESP32-S3<br/>(JC4827W543)"]
-    MAX6675["MAX6675<br/>Thermocouple Amp"]
-    SSR["40A SSR Module<br/>(heating element)"]
-    FANPWM["Fan MOSFET Module<br/>(fan motor)"]
+flowchart LR
+    ACIN["AC mains input (L / N)"] --> PWR
 
-    ESP32S3 -- "P2: IO9 (SCK)" --> MAX6675
-    ESP32S3 -- "P2: IO14 (CS)" --> MAX6675
-    MAX6675 -- "P2: IO46 (SO/MISO)" --> ESP32S3
-    ESP32S3 -- "P4: 3.3V/GND (power)" --> MAX6675
+    subgraph PWR["24V power supply"]
+        V24["+24V"]
+        GND["GND terminal"]
+    end
 
-    ESP32S3 -- "P2: IO5 (on/off)" --> SSR
-    ESP32S3 -- "P4: IO17 (PWM)" --> FANPWM
+    subgraph STEP["Step-down Mini560"]
+        MIN["+24V / GND"]
+        MOUT["OUT 5V / GND"]
+    end
+
+    subgraph BOARD["Guition JC4827W543 (ESP32-S3)"]
+        P1["P1: +5V, GND"]
+        P2["P2: IO46, IO9, IO14, IO5"]
+        P4["P4: 3.3V, GND, IO17"]
+    end
+
+    subgraph TC["MAX6675 module (5-wire ribbon)"]
+        TVCC["+3.3V"]
+        TGND["GND"]
+        TSCK["SCK"]
+        TCS["CS"]
+        TSO["SO"]
+        TIN["T+ / T-"]
+    end
+
+    K["K-type thermocouple"]
+    CAP["100nF ceramic capacitor<br/>(across T+ / T-)"]
+
+    subgraph SSRM["40A SSR module"]
+        SIN["Control + / -"]
+        SLOAD["Load (AC side)"]
+    end
+
+    HEAT["Heating element"]
+    MAINS["AC mains"]
+
+    subgraph XYM["XY-MOS module"]
+        XIN["+24V / GND"]
+        XCTRL["Control (PWM)"]
+        XOUT["OUT+ / OUT-"]
+    end
+
+    FAN["Fan motor<br/>(original rectifier diodes removed)"]
+
+    V24 -- "24V" --> MIN
+    GND --- MIN
+    MOUT -- "5V + GND" --> P1
+
+    V24 -- "24V" --> XIN
+    GND --- XIN
+    XOUT -- "+ / - soldered directly" --> FAN
+
+    P4 -- "3.3V" --> TVCC
+    P4 -- "GND" --> TGND
+    P2 -- "IO9" --> TSCK
+    P2 -- "IO14" --> TCS
+    TSO -- "IO46" --> P2
+    K --- TIN
+    CAP --- TIN
+
+    P2 -- "IO5 (on/off)" --> SIN
+    GND -- "GND" --- SIN
+    MAINS --- SLOAD
+    SLOAD --- HEAT
+
+    P4 -- "IO17 (PWM)" --> XCTRL
 ```
+
+| From | To | Signal |
+|------|----|--------|
+| AC mains L / N | 24V supply AC input | Mains input |
+| 24V supply +24V | Mini560 +24V | Power |
+| 24V supply GND | Mini560 GND | Ground |
+| Mini560 OUT 5V / GND | Board P1 (+5V / GND) | Board power |
+| 24V supply +24V | XY-MOS +24V | Fan power |
+| 24V supply GND | XY-MOS GND (input terminal already has GND) | Ground |
+| XY-MOS OUT+ / OUT- | Fan motor + / - (direct, diodes removed) | Fan drive |
+| Board P4 3.3V | MAX6675 +3.3V | Sensor power |
+| Board P4 GND | MAX6675 GND | Ground |
+| Board P2 IO9 | MAX6675 SCK | Clock |
+| Board P2 IO14 | MAX6675 CS | Chip select |
+| MAX6675 SO | Board P2 IO46 | Data (input-only pin) |
+| Board P2 IO5 | SSR control + | Heater on/off |
+| 24V supply GND terminal | SSR control - | Ground |
+| Board P4 IO17 | XY-MOS control | Fan PWM |
+| 100nF capacitor | Across MAX6675 thermocouple pads (T+ / T-) | Noise filtering |
 
 > **Safety:** the SSR and PWM modules switch mains-voltage/high-current
 > loads (heating element, fan motor). Follow the module manufacturer's own

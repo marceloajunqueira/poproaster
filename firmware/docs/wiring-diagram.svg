@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1000" viewBox="0 0 1500 1000" font-family="Arial, Helvetica, sans-serif">
+  <rect width="1500" height="1000" fill="#ffffff"/>
+  <text x="40" y="36" font-size="22" font-weight="bold" fill="#212121">Pop Roaster - wiring diagram (as built)</text>
+
+  <!-- ===== Wires ===== -->
+  <g fill="none" stroke-width="3" stroke-linejoin="round" stroke-linecap="round">
+    <!-- +24V: supply -> Mini560 IN+ and XY-MOS VIN+ -->
+    <path d="M200,380 H250 V90 H300" stroke="#d32f2f"/>
+    <path d="M250,380 V890 H1030 V740 H1050" stroke="#d32f2f"/>
+
+    <!-- GND: supply -> Mini560 IN-, SSR control -, XY-MOS VIN- -->
+    <path d="M200,500 H245 a5,5 0 0 1 10,0 H270 V130 H300" stroke="#212121"/>
+    <path d="M270,500 V860 H1000 V470 H1050" stroke="#212121"/>
+    <path d="M1000,700 H1050" stroke="#212121"/>
+
+    <!-- 5V + GND: Mini560 -> board P1 -->
+    <path d="M470,90 H620 V250" stroke="#f57c00"/>
+    <path d="M470,130 H660 V250" stroke="#212121"/>
+
+    <!-- MAX6675 signals (P2) -->
+    <path d="M860,300 H900 V100 H1050" stroke="#2e7d32"/>
+    <path d="M860,340 H930 V130 H1050" stroke="#2e7d32"/>
+    <path d="M860,380 H960 V160 H1050" stroke="#2e7d32"/>
+
+    <!-- MAX6675 power (P4) -->
+    <path d="M860,500 H980 V230 H1050" stroke="#212121"/>
+    <path d="M860,540 H990 V260 H1050" stroke="#1976d2"/>
+
+    <!-- SSR control (P2 IO5) -->
+    <path d="M860,420 H975 a5,5 0 0 1 10,0 a5,5 0 0 1 10,0 H1050" stroke="#7b1fa2"/>
+
+    <!-- Fan PWM (P4 IO17) -->
+    <path d="M860,580 H995 a5,5 0 0 1 10,0 H1015 V654 H1050" stroke="#00838f"/>
+
+    <!-- Thermocouple + 100nF capacitor -->
+    <path d="M1300,124 H1380" stroke="#fbc02d"/>
+    <path d="M1300,184 H1380" stroke="#fbc02d"/>
+    <path d="M1330,124 V147 M1330,161 V184" stroke="#424242" stroke-width="2"/>
+
+    <!-- SSR load side -->
+    <path d="M1300,410 H1380" stroke="#6d4c41"/>
+    <path d="M1300,490 H1380" stroke="#6d4c41"/>
+
+    <!-- AC input of the 24V supply -->
+    <path d="M80,240 V300" stroke="#6d4c41"/>
+    <path d="M160,240 V300" stroke="#6d4c41"/>
+
+    <!-- XY-MOS output -> fan motor -->
+    <path d="M1300,704 H1386" stroke="#d32f2f"/>
+    <path d="M1300,744 H1386" stroke="#212121"/>
+  </g>
+
+  <!-- Junction dots -->
+  <g fill="#212121">
+    <circle cx="250" cy="380" r="4" fill="#d32f2f"/>
+    <circle cx="270" cy="500" r="4"/>
+    <circle cx="1000" cy="700" r="4"/>
+  </g>
+
+  <!-- Capacitor plates -->
+  <g stroke="#424242" stroke-width="3">
+    <line x1="1318" y1="147" x2="1342" y2="147"/>
+    <line x1="1318" y1="161" x2="1342" y2="161"/>
+  </g>
+  <text x="1350" y="158" font-size="12" fill="#424242">100nF</text>
+
+  <!-- ===== 24V power supply ===== -->
+  <rect x="40" y="300" width="160" height="260" rx="8" fill="#bdbdbd" stroke="#424242" stroke-width="2"/>
+  <g stroke="#9e9e9e" stroke-width="3">
+    <line x1="60" y1="340" x2="130" y2="340"/><line x1="60" y1="356" x2="130" y2="356"/>
+    <line x1="60" y1="372" x2="130" y2="372"/><line x1="60" y1="388" x2="130" y2="388"/>
+  </g>
+  <g font-size="12" font-weight="bold" fill="#4e342e">
+    <text x="80" y="322" text-anchor="middle">L</text>
+    <text x="160" y="322" text-anchor="middle">N</text>
+  </g>
+  <g fill="#6d4c41" stroke="#424242">
+    <circle cx="80" cy="300" r="6"/><circle cx="160" cy="300" r="6"/>
+  </g>
+  <rect x="40" y="180" width="160" height="60" rx="6" fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
+  <text x="120" y="206" font-size="13" font-weight="bold" text-anchor="middle" fill="#bf360c">AC mains input</text>
+  <text x="120" y="224" font-size="11" text-anchor="middle" fill="#6d4c41">L / N to the 24V supply</text>
+  <text x="100" y="440" font-size="15" font-weight="bold" text-anchor="middle" fill="#212121">24V</text>
+  <text x="100" y="458" font-size="13" text-anchor="middle" fill="#212121">power supply</text>
+  <text x="165" y="384" font-size="12" font-weight="bold" text-anchor="end" fill="#b71c1c">+24V</text>
+  <text x="165" y="504" font-size="12" font-weight="bold" text-anchor="end" fill="#212121">GND</text>
+  <circle cx="200" cy="380" r="6" fill="#d32f2f" stroke="#424242"/>
+  <circle cx="200" cy="500" r="6" fill="#212121" stroke="#424242"/>
+
+  <!-- ===== Mini560 ===== -->
+  <text x="385" y="50" font-size="14" font-weight="bold" text-anchor="middle" fill="#212121">Step-down Mini560 (24V to 5V)</text>
+  <rect x="300" y="60" width="170" height="100" rx="5" fill="#2e7d32" stroke="#1b5e20" stroke-width="2"/>
+  <rect x="345" y="78" width="80" height="44" rx="4" fill="#424242"/>
+  <text x="385" y="105" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">Mini560</text>
+  <text x="385" y="148" font-size="11" text-anchor="middle" fill="#ffffff">5V output</text>
+  <g font-size="11" fill="#ffffff">
+    <text x="308" y="94">+24V</text><text x="308" y="134">GND</text>
+    <text x="462" y="94" text-anchor="end">5V</text><text x="462" y="134" text-anchor="end">GND</text>
+  </g>
+  <g fill="#ffffff" stroke="#333">
+    <circle cx="300" cy="90" r="4"/><circle cx="300" cy="130" r="4"/>
+    <circle cx="470" cy="90" r="4"/><circle cx="470" cy="130" r="4"/>
+  </g>
+  <text x="540" y="82" font-size="12" font-weight="bold" text-anchor="middle" fill="#e65100">5V</text>
+  <text x="540" y="150" font-size="12" font-weight="bold" text-anchor="middle" fill="#212121">GND</text>
+
+  <!-- ===== Display board ===== -->
+  <rect x="560" y="250" width="300" height="400" rx="10" fill="#263238" stroke="#000" stroke-width="2"/>
+  <rect x="580" y="300" width="175" height="310" rx="4" fill="#0d47a1"/>
+  <text x="667" y="450" font-size="14" font-weight="bold" text-anchor="middle" fill="#ffffff">4.3" display</text>
+  <text x="667" y="470" font-size="12" text-anchor="middle" fill="#bbdefb">480x272 touch</text>
+  <text x="710" y="676" font-size="14" font-weight="bold" text-anchor="middle" fill="#212121">Guition JC4827W543 (ESP32-S3)</text>
+  <g font-size="11" fill="#ffffff">
+    <text x="585" y="268" font-weight="bold" text-anchor="middle">P1</text>
+    <text x="620" y="268" text-anchor="middle">+5V</text>
+    <text x="660" y="268" text-anchor="middle">GND</text>
+    <text x="850" y="282" font-weight="bold" text-anchor="end">P2</text>
+    <text x="850" y="304" text-anchor="end">IO46</text>
+    <text x="850" y="344" text-anchor="end">IO9</text>
+    <text x="850" y="384" text-anchor="end">IO14</text>
+    <text x="850" y="424" text-anchor="end">IO5</text>
+    <text x="850" y="482" font-weight="bold" text-anchor="end">P4</text>
+    <text x="850" y="504" text-anchor="end">GND</text>
+    <text x="850" y="544" text-anchor="end">3.3V</text>
+    <text x="850" y="584" text-anchor="end">IO17</text>
+    <text x="850" y="624" text-anchor="end" fill="#90a4ae">IO18 (spare)</text>
+  </g>
+  <g fill="#ffffff" stroke="#333">
+    <circle cx="620" cy="250" r="4"/><circle cx="660" cy="250" r="4"/>
+    <circle cx="860" cy="300" r="4"/><circle cx="860" cy="340" r="4"/>
+    <circle cx="860" cy="380" r="4"/><circle cx="860" cy="420" r="4"/>
+    <circle cx="860" cy="500" r="4"/><circle cx="860" cy="540" r="4"/>
+    <circle cx="860" cy="580" r="4"/><circle cx="860" cy="620" r="4" fill="#90a4ae"/>
+  </g>
+
+  <!-- ===== MAX6675 ===== -->
+  <text x="1175" y="50" font-size="14" font-weight="bold" text-anchor="middle" fill="#212121">MAX6675 module</text>
+  <rect x="1050" y="60" width="250" height="240" rx="6" fill="#1565c0" stroke="#0d47a1" stroke-width="2"/>
+  <rect x="1110" y="90" width="110" height="80" rx="4" fill="#212121"/>
+  <text x="1165" y="135" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">MAX6675</text>
+  <g font-size="11" fill="#ffffff">
+    <text x="1058" y="104">SO</text><text x="1058" y="134">SCK</text><text x="1058" y="164">CS</text>
+    <text x="1058" y="234">GND</text><text x="1058" y="264">+3.3V</text>
+    <text x="1292" y="128" text-anchor="end">T+</text><text x="1292" y="188" text-anchor="end">T-</text>
+  </g>
+  <g fill="#ffffff" stroke="#333">
+    <circle cx="1050" cy="100" r="4"/><circle cx="1050" cy="130" r="4"/><circle cx="1050" cy="160" r="4"/>
+    <circle cx="1050" cy="230" r="4"/><circle cx="1050" cy="260" r="4"/>
+    <circle cx="1300" cy="124" r="4"/><circle cx="1300" cy="184" r="4"/>
+  </g>
+  <text x="1175" y="322" font-size="11" font-style="italic" text-anchor="middle" fill="#424242">5-wire ribbon: 3.3V, GND, SCK, CS, SO</text>
+  <rect x="1380" y="100" width="100" height="108" rx="6" fill="#efebe9" stroke="#6d4c41" stroke-width="2"/>
+  <text x="1430" y="150" font-size="13" font-weight="bold" text-anchor="middle" fill="#4e342e">K-type</text>
+  <text x="1430" y="168" font-size="13" font-weight="bold" text-anchor="middle" fill="#4e342e">thermocouple</text>
+
+  <!-- ===== SSR ===== -->
+  <text x="1175" y="372" font-size="14" font-weight="bold" text-anchor="middle" fill="#212121">40A SSR module</text>
+  <rect x="1050" y="380" width="250" height="140" rx="6" fill="#37474f" stroke="#102027" stroke-width="2"/>
+  <rect x="1110" y="400" width="110" height="100" rx="4" fill="#c62828"/>
+  <text x="1165" y="456" font-size="16" font-weight="bold" text-anchor="middle" fill="#ffffff">SSR</text>
+  <g font-size="11" fill="#ffffff">
+    <text x="1058" y="424">CTRL +</text><text x="1058" y="474">CTRL -</text>
+    <text x="1292" y="414" text-anchor="end">LOAD</text><text x="1292" y="494" text-anchor="end">LOAD</text>
+  </g>
+  <g fill="#ffffff" stroke="#333">
+    <circle cx="1050" cy="420" r="4"/><circle cx="1050" cy="470" r="4"/>
+    <circle cx="1300" cy="410" r="4"/><circle cx="1300" cy="490" r="4"/>
+  </g>
+  <rect x="1380" y="385" width="100" height="50" rx="6" fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
+  <text x="1430" y="415" font-size="13" font-weight="bold" text-anchor="middle" fill="#bf360c">AC mains</text>
+  <rect x="1380" y="465" width="100" height="50" rx="6" fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
+  <polyline points="1392,490 1402,478 1412,502 1422,478 1432,502 1442,478 1452,502 1462,490 1470,490" fill="none" stroke="#e65100" stroke-width="2"/>
+  <text x="1430" y="531" font-size="11" text-anchor="middle" fill="#bf360c">Heating element</text>
+  <text x="1430" y="547" font-size="10" text-anchor="middle" fill="#6d4c41">(returns to mains)</text>
+
+  <!-- ===== XY-MOS ===== -->
+  <text x="1175" y="612" font-size="14" font-weight="bold" text-anchor="middle" fill="#212121">XY-MOS module</text>
+  <rect x="1050" y="620" width="250" height="160" rx="6" fill="#b71c1c" stroke="#7f0000" stroke-width="2"/>
+  <rect x="1110" y="650" width="110" height="80" rx="4" fill="#212121"/>
+  <text x="1165" y="696" font-size="13" font-weight="bold" text-anchor="middle" fill="#ffffff">MOSFET</text>
+  <g font-size="11" fill="#ffffff">
+    <text x="1058" y="658">CTRL</text><text x="1058" y="704">GND</text><text x="1058" y="744">+24V</text>
+    <text x="1292" y="708" text-anchor="end">OUT+</text><text x="1292" y="748" text-anchor="end">OUT-</text>
+  </g>
+  <g fill="#ffffff" stroke="#333">
+    <circle cx="1050" cy="654" r="4"/><circle cx="1050" cy="700" r="4"/><circle cx="1050" cy="740" r="4"/>
+    <circle cx="1300" cy="704" r="4"/><circle cx="1300" cy="744" r="4"/>
+  </g>
+  <circle cx="1426" cy="724" r="40" fill="#eceff1" stroke="#37474f" stroke-width="3"/>
+  <text x="1426" y="734" font-size="28" font-weight="bold" text-anchor="middle" fill="#37474f">M</text>
+  <text x="1426" y="786" font-size="13" font-weight="bold" text-anchor="middle" fill="#212121">Fan motor</text>
+  <text x="1426" y="802" font-size="10" text-anchor="middle" fill="#424242">(rectifier diodes removed,</text>
+  <text x="1426" y="815" font-size="10" text-anchor="middle" fill="#424242">XY-MOS output soldered directly)</text>
+
+  <!-- Wire labels -->
+  <text x="600" y="884" font-size="12" font-weight="bold" text-anchor="middle" fill="#b71c1c">+24V</text>
+  <text x="600" y="854" font-size="12" font-weight="bold" text-anchor="middle" fill="#212121">GND (24V supply GND terminal)</text>
+
+  <!-- ===== Legend ===== -->
+  <g font-size="12" fill="#212121">
+    <line x1="40" y1="940" x2="70" y2="940" stroke="#d32f2f" stroke-width="3"/><text x="76" y="944">+24V</text>
+    <line x1="140" y1="940" x2="170" y2="940" stroke="#f57c00" stroke-width="3"/><text x="176" y="944">5V</text>
+    <line x1="230" y1="940" x2="260" y2="940" stroke="#1976d2" stroke-width="3"/><text x="266" y="944">3.3V</text>
+    <line x1="330" y1="940" x2="360" y2="940" stroke="#212121" stroke-width="3"/><text x="366" y="944">GND (common)</text>
+    <line x1="480" y1="940" x2="510" y2="940" stroke="#2e7d32" stroke-width="3"/><text x="516" y="944">MAX6675 signals</text>
+    <line x1="650" y1="940" x2="680" y2="940" stroke="#7b1fa2" stroke-width="3"/><text x="686" y="944">SSR control (IO5)</text>
+    <line x1="810" y1="940" x2="840" y2="940" stroke="#00838f" stroke-width="3"/><text x="846" y="944">Fan PWM (IO17)</text>
+    <line x1="1010" y1="940" x2="1040" y2="940" stroke="#6d4c41" stroke-width="3"/><text x="1046" y="944">AC (L / N)</text>
+    <text x="40" y="970" fill="#616161">Dots = junctions; a small arc = wires crossing without connection.</text>
+  </g>
+</svg>
