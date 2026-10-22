@@ -3,12 +3,25 @@
 # Pop Roaster
 
 Um torrador de café caseiro feito em cima de uma pipoqueira elétrica de ar
-quente, controlado por um ESP32-S3. A ideia é pegar um equipamento barato e
-transformar ele num torrador de verdade, com controle de temperatura,
-perfis de torra e acompanhamento em tempo real.
+quente, controlado por um ESP32-S3. Barato e *overengineered* de propósito,
+torra até **80 gramas** de café por vez.
 
-A ideia é uma pipoqueira barata, *overengineered* de propósito, para torrar
-café de forma barata. Ele consegue torrar até **80 gramas** de café por vez.
+Tem um **display touch** próprio para acompanhar a torra ao vivo, editar
+perfis e ver o histórico. Com os **presets** (tempo, temperatura e fan por
+segmento), a torra pode ser **100% automática**: escolha o preset, carregue o
+café e o firmware conduz até o resfriamento.
+
+![Telas do display](images/screens.gif)
+
+### Pontos fortes
+
+- **Barato:** base de pipoqueira comum e poucos módulos prontos (veja a BOM).
+- **Repetível:** PID em malha fechada seguindo o perfil, com rampa entre os
+  segmentos.
+- **Flexível:** modo Manual ou controle pelo Artisan via Modbus TCP.
+- **Conectado:** dashboard no navegador, histórico com CSV e firmware por OTA.
+- **Seguro:** corte por temperatura, detecção de falha de sensor/fan e
+  Emergency Stop sempre visível.
 
 ![Pop Roaster em funcionamento](images/pop.gif)
 
@@ -50,34 +63,65 @@ arquivos 3D (suportes, caixa do display e STEP dos módulos) estão na pasta
 
 ## O que ele faz
 
-- Tela touch no próprio equipamento com dashboard da torra ao vivo (BT -
-  temperatura do grão, RoR - taxa de subida, tempo).
-- Dashboard também pelo navegador (Wi-Fi), com os mesmos controles, além das
-  páginas de presets, histórico, diagnóstico (ajuste do PID e autotune) e
-  atualização de firmware.
-- Modo Profile (perfil de torra) e modo Manual (você define a temperatura
-  alvo e o nível do fan).
-- Perfis de torra configuráveis por segmento (tempo + temperatura + fan), com
-  rampa de temperatura entre os segmentos (evita ficar "parado" num degrau).
-  Podem ser criados/editados na tela ou pelo navegador, e importados/exportados.
-- Controle de temperatura em malha fechada (PID) - você escolhe a
-  temperatura, o firmware calcula a potência do aquecedor. O ganho do PID pode
-  ser ajustado (ou calculado por autotune) pela página de diagnóstico.
-- Fan com 3 níveis fixos (90 / 95 / 100%).
-- Histórico das torras salvo no próprio equipamento, com gráfico de BT x tempo
-  e exportação em CSV.
-- Integração com o Artisan via Modbus TCP
-  ([passo a passo](firmware/docs/artisan-integration.md)).
-- Atualização de firmware por OTA (sem precisar abrir o equipamento).
-- Interface em inglês, português e espanhol (na tela, em Config > Language).
-- Camadas de segurança: aviso em 230 °C e corte automático por temperatura em
-  240 °C, watchdog de duração da torra, detecção de falha de sensor/ventoinha,
-  botão de Emergency Stop sempre visível, etc.
+**Durante a torra**
 
+- Dashboard ao vivo com BT (temperatura do grão), RoR (taxa de subida), gráfico
+  BT x curva alvo e tempo, na tela e no navegador (atualização em ~2 Hz).
+- Fluxo completo: pré-aquecimento até o primeiro segmento, confirmação do
+  Charge, torra, resfriamento e finalização automática, com o fan desligando
+  sozinho quando a temperatura é segura.
+- Marcação de eventos: Turning Point e Cool Start automáticos; Primeiro e
+  Segundo Crack (início/fim) marcados por você com um toque.
+- Pause/retomada, botão "Próximo segmento" para pular adiante na curva e
+  cancelamento em dois estágios (primeiro resfria, depois encerra).
+- Se a energia cair no meio da torra, a sessão é retomada na volta (o
+  aquecedor só religa por comando seu).
+
+**Perfis e controle**
+
+- Perfis por segmento (tempo + temperatura + fan) com rampa entre os
+  segmentos, editáveis na tela ou no navegador, e importáveis/exportáveis.
+- Cada torra guarda uma cópia do perfil usado, então editar um preset depois
+  não altera o histórico.
+- Manual: você define a temperatura alvo e o nível do fan (90 / 95 / 100%) e o
+  PID cuida do aquecedor. Se mexer no fan ou no aquecedor durante um perfil, o
+  controle automático dá a vez a você até o próximo segmento.
+- PID com ajuste ao vivo pela página de diagnóstico (ganhos, filtro da
+  derivada, rampa de setpoint, curva de compensação do aquecedor, potência
+  mínima durante a torra) e **autotune** na própria tela, com os ganhos salvos
+  no equipamento.
+- Limite de potência do aquecedor (Max Heater Power) para domar uma resistência
+  forte demais e calibração do sensor por temperatura de referência.
+
+**Histórico e análise**
+
+- Histórico salvo no equipamento, com gráfico de BT x tempo, eventos e
+  exportação em CSV.
+- Log do PID (erro, termos P/I/D, potência aplicada) para baixar e analisar
+  offline, útil para ajustar o controle com dados reais.
+
+**Conectividade**
+
+- Dashboard pelo navegador em `poproaster.local`, com presets, histórico,
+  diagnóstico e Wi-Fi.
+- Artisan via Modbus TCP, lendo BT/fan/aquecedor/RoR e podendo comandar fan e
+  aquecedor ([passo a passo](firmware/docs/artisan-integration.md)).
+- Atualização de firmware por OTA com rollback automático se a nova versão não
+  subir, e instalação sem ferramentas pelo flasher web.
+- Captura da tela do display pelo navegador (página Screen Capture), útil para
+  documentação.
+- Interface em inglês, português e espanhol (Config > Language).
+
+**Diagnóstico e segurança**
+
+- Tela de teste dos periféricos (sensor, fan e aquecedor) para validar a
+  montagem antes da primeira torra.
+- Aviso em 230 °C e corte automático em 240 °C, watchdog de duração da torra,
+  detecção de falha de sensor e de ventoinha, aquecedor só liga com o fan
+  rodando e Emergency Stop sempre visível.
 ## Gravar o firmware
 
-Os binários ficam em [Releases](https://github.com/marceloajunqueira/poproaster/releases)
-(criadas ao publicar uma tag `vX.Y.Z`, ex.: `git tag v0.1.0 && git push origin v0.1.0`):
+Os binários ficam em [Releases](https://github.com/marceloajunqueira/poproaster/releases):
 
 - `pop_roaster-full.bin`: imagem completa, para gravar no offset `0x0` (primeira instalação).
 - `pop_roaster-ota.bin`: só o app, para atualização por OTA.
