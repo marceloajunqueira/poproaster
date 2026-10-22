@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "i18n.c"
         "display_panel.c"
+        "screenshot.c"
         "nv3041_qspi.c"
         "widgets/nav_shell.c"
         "screens/placeholder_screen.c"
@@ -26,6 +27,7 @@ idf_component_register(
         esp_lcd
         esp_driver_spi
         esp_driver_ledc
+        heap
         eric-c-e__esp_lcd_nv3041
         espressif__esp_lvgl_port
         lvgl__lvgl

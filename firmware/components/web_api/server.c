@@ -15,6 +15,7 @@
 #include "web_api/presets_routes.h"
 #include "web_api/diagnostics_routes.h"
 #include "web_api/ota_routes.h"
+#include "web_api/screenshot_routes.h"
 
 static const char *TAG = "web_api_server";
 static httpd_handle_t s_server = NULL;
@@ -104,6 +105,12 @@ esp_err_t web_api_server_init(void)
     err = ota_routes_register(s_server);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ota_routes_register failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = screenshot_routes_register(s_server);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "screenshot_routes_register failed: %s", esp_err_to_name(err));
         return err;
     }
 

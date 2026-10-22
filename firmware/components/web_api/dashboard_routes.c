@@ -91,6 +91,11 @@ void web_ui_send_nav_bar(httpd_req_t *req, const char *active_page)
                                ? "<a class='active' href='/ota'><span class='navicon'>&#8593;</span><span>Firmware Update</span></a>"
                                : "<a href='/ota'><span class='navicon'>&#8593;</span><span>Firmware Update</span></a>",
                            HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req,
+                           strcmp(active_page, "screen") == 0
+                               ? "<a class='active' href='/screen'><span class='navicon'>&#128247;</span><span>Screen Capture</span></a>"
+                               : "<a href='/screen'><span class='navicon'>&#128247;</span><span>Screen Capture</span></a>",
+                           HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, "</nav>", HTTPD_RESP_USE_STRLEN);
 }
 

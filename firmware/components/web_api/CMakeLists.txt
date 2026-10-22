@@ -7,6 +7,7 @@ idf_component_register(
         "presets_routes.c"
         "diagnostics_routes.c"
         "ota_routes.c"
+        "screenshot_routes.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -14,6 +15,7 @@ idf_component_register(
         lwip
         roaster_hal
         roast_core
+        ui_display
         storage
         safety
         nvs_flash

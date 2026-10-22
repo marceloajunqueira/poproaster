@@ -248,6 +248,15 @@ static void drive_manual_heater(void)
     roast_telemetry_snapshot_t snap;
     roast_telemetry_service_get_snapshot(&snap);
 
+    /* No target set: keep the heater off and the PID idle. Running it here fed
+     * measured=target(0) whenever the sensor read invalid, which made the D term
+     * see a fake BT drop to 0C and kick the output high - auto-starting the fan at idle. */
+    if (s_manual_target_temp_c <= 0.0f) {
+        heater_pid_reset();
+        command_dispatcher_set_heater_pct(0, SAFETY_CMD_SOURCE_DISPLAY);
+        return;
+    }
+
     uint8_t heater_target = heater_pid_update(s_manual_target_temp_c,
                                                snap.sensor_valid ? snap.bean_temp_c : s_manual_target_temp_c,
                                                FOLLOWER_PERIOD_US / 1000000.0f);

@@ -45,6 +45,14 @@ esp_err_t nav_shell_init(nav_shell_tab_t initial_tab);
 /** T055: re-renders every tab's sidebar label from the current i18n language - call right after i18n_set_language(). */
 void nav_shell_refresh_labels(void);
 
+/** Currently shown tab, or NAV_SHELL_TAB_COUNT before nav_shell_init(). Caller must hold the LVGL lock. */
+nav_shell_tab_t nav_shell_get_current_tab(void);
+
+/** Programmatic tab switch (same effect as tapping the sidebar). Refused with
+ * ESP_ERR_INVALID_STATE while a roast is active, to protect the live chart.
+ * Caller must hold the LVGL lock. */
+esp_err_t nav_shell_select_tab(nav_shell_tab_t tab);
+
 #ifdef __cplusplus
 }
 #endif

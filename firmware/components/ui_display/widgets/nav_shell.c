@@ -209,6 +209,26 @@ static void tab_click_cb(lv_event_t *e)
     switch_to_tab(tab);
 }
 
+nav_shell_tab_t nav_shell_get_current_tab(void)
+{
+    return s_current_tab;
+}
+
+esp_err_t nav_shell_select_tab(nav_shell_tab_t tab)
+{
+    if ((int)tab < 0 || tab >= NAV_SHELL_TAB_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_content == NULL || s_tabs[tab].label == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (tab != s_current_tab && roast_is_active()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    switch_to_tab(tab);
+    return ESP_OK;
+}
+
 static void estop_click_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
