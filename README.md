@@ -7,25 +7,28 @@ quente, controlado por um ESP32-S3. A ideia é pegar um equipamento barato e
 transformar ele num torrador de verdade, com controle de temperatura,
 perfis de torra e acompanhamento em tempo real.
 
+A ideia é uma pipoqueira barata, *overengineered* de propósito, para torrar
+café de forma barata. Ele consegue torrar até **80 gramas** de café por vez.
+
 ![Pop Roaster em funcionamento](images/pop.gif)
 
 ## BOM (lista de componentes)
 
 ![BOM](images/bom.jpg)
 
-| Item | Part Number | Link | Comentário | Preço |
-|---|---|---|---|---|
-| Pipoqueira | | [link](https://shopee.com.br/Pipoqueira-El%C3%A9trica-Super-Premium-1200W-Sem-%C3%93leo-Ar-Quente-i.389800143.22498754445) | | R$ 120,00 |
-| Display | JC4827W543 | [link](https://pt.aliexpress.com/item/1005006729377800.html) | Selecionar Capacitive Touch | R$ 115,00 |
-| SSR | SSR-40DA | [link](https://pt.aliexpress.com/item/1005005943909513.html) | Aquecedor | R$ 9,50 |
-| Módulo MOSFET (PWM do fan) | XY-MOS | [link](https://pt.aliexpress.com/item/1005012364216704.html) | | R$ 3,36 |
-| Termopar | MAX6675 | [link](https://pt.aliexpress.com/item/1005003841451196.html) | Selecionar Kit with probe | R$ 10,79 |
-| Fonte | 24V 2A | [link](https://br.shp.ee/zNRZV278) | Alimenta o Mini560 e o XY-MOS | R$ 19,90 |
-| Step-down | Mini560 (saída 5V) | | Alimenta o display (conector P1) a partir dos 24V | |
-| Capacitor cerâmico | 100nF | | Soldado nos pads do termopar do MAX6675, para estabilizar a leitura | |
-| Manta térmica de escapamento de moto (fibra de vidro) | | | Isola o aquecedor da carcaça de metal; o kit já vem com as braçadeiras (usei 2) | |
-| Fita de alumínio fina | | | Cobre a manta, para bloquear a radiação IR | |
-| Conectores/cabos JST1.25 de 4 pinos | | | 3 unidades (P1, P2 e P4) | |
+| Item | Part Number | Link | Comentário |
+|---|---|---|---|
+| Pipoqueira | | [link](https://shopee.com.br/Pipoqueira-El%C3%A9trica-Super-Premium-1200W-Sem-%C3%93leo-Ar-Quente-i.389800143.22498754445) | |
+| Display | JC4827W543 | [link](https://pt.aliexpress.com/item/1005006729377800.html) | Selecionar Capacitive Touch |
+| SSR | SSR-40DA | [link](https://pt.aliexpress.com/item/1005005943909513.html) | Aquecedor |
+| Módulo MOSFET (PWM do fan) | XY-MOS | [link](https://pt.aliexpress.com/item/1005012364216704.html) | |
+| Termopar | MAX6675 | [link](https://pt.aliexpress.com/item/1005003841451196.html) | Selecionar Kit with probe |
+| Fonte | 24V 2A | [link](https://br.shp.ee/zNRZV278) | Alimenta o Mini560 e o XY-MOS |
+| Step-down | Mini560 (saída 5V) | [link](https://pt.aliexpress.com/item/1005008280160694.html) | Alimenta o display (conector P1) a partir dos 24V |
+| Capacitor cerâmico | 100nF | | Soldado nos pads do termopar do MAX6675, para estabilizar a leitura |
+| Manta térmica de escapamento de moto (fibra de vidro) | | | Isola o aquecedor da carcaça de metal; o kit já vem com as braçadeiras (usei 2) |
+| Fita de alumínio fina | | | Cobre a manta, para bloquear a radiação IR |
+| Conectores/cabos JST1.25 de 4 pinos | | [link](https://pt.aliexpress.com/item/1005007277110532.html) | Selecionar o de 4 pinos. 3 unidades (P1, P2 e P4) |
 
 ## Montagem
 
