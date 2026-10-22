@@ -284,10 +284,72 @@ static void show_session_detail(lv_obj_t *parent, const char *session_id)
     fclose(f);
     lv_chart_refresh(chart);
 
+    /* Legend and stats rows MUST exist before the layout pass below: the
+     * chart is flex_grow, so its final height is only known once every
+     * sibling is in place. Measuring earlier made the overlay use a taller
+     * content box than the series, shifting the target curve down. */
+    lv_obj_t *legend = lv_label_create(root);
+    lv_obj_add_style(legend, &s_style_stat_label, LV_PART_MAIN);
+    lv_label_set_text(legend, "Dashed = target, solid = actual (BT orange / Fan green)");
+    lv_label_set_long_mode(legend, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(legend, content_w);
+
+    int64_t total_s = max_t_ms / 1000;
+    long avg_heater = (sample_count > 0) ? (heater_sum / (long)sample_count) : 0;
+    long avg_fan = (sample_count > 0) ? (fan_sum / (long)sample_count) : 0;
+    char stat_buf[64];
+
+    lv_obj_t *stat_row1 = make_flex_row(root, content_w);
+    lv_obj_t *stat1 = lv_label_create(stat_row1);
+    lv_obj_add_style(stat1, &s_style_stat_label, LV_PART_MAIN);
+    snprintf(stat_buf, sizeof(stat_buf), "Total time: %02d:%02d", (int)(total_s / 60), (int)(total_s % 60));
+    lv_label_set_text(stat1, stat_buf);
+    lv_obj_t *stat2 = lv_label_create(stat_row1);
+    lv_obj_add_style(stat2, &s_style_stat_label, LV_PART_MAIN);
+    snprintf(stat_buf, sizeof(stat_buf), "Max BT: %.1f C", max_bt);
+    lv_label_set_text(stat2, stat_buf);
+
+    lv_obj_t *stat_row2 = make_flex_row(root, content_w);
+    lv_obj_t *stat3 = lv_label_create(stat_row2);
+    lv_obj_add_style(stat3, &s_style_stat_label, LV_PART_MAIN);
+    snprintf(stat_buf, sizeof(stat_buf), "Max RoR: %.1f C/min", max_ror);
+    lv_label_set_text(stat3, stat_buf);
+    lv_obj_t *stat4 = lv_label_create(stat_row2);
+    lv_obj_add_style(stat4, &s_style_stat_label, LV_PART_MAIN);
+    snprintf(stat_buf, sizeof(stat_buf), "Avg Fan/Heater: %ld%%/%ld%%", avg_fan, avg_heater);
+    lv_label_set_text(stat4, stat_buf);
+
+    /* T057: batch metadata, only shown when the operator actually filled
+     * something in (older sessions and quick test roasts won't have it). */
+    bool has_batch_info = has_meta && (meta.batch.coffee_name[0] != '\0' ||
+                                        meta.batch.origin[0] != '\0' ||
+                                        meta.batch.weight_g > 0.0f);
+    if (has_batch_info) {
+        lv_obj_t *batch_title = lv_label_create(root);
+        lv_obj_add_style(batch_title, &s_style_stat_label, LV_PART_MAIN);
+        lv_label_set_text(batch_title, "Batch Info:");
+
+        lv_obj_t *stat_row3 = make_flex_row(root, content_w);
+        lv_obj_t *stat5 = lv_label_create(stat_row3);
+        lv_obj_add_style(stat5, &s_style_stat_label, LV_PART_MAIN);
+        snprintf(stat_buf, sizeof(stat_buf), "Coffee: %s", meta.batch.coffee_name[0] ? meta.batch.coffee_name : "-");
+        lv_label_set_text(stat5, stat_buf);
+        lv_obj_t *stat6 = lv_label_create(stat_row3);
+        lv_obj_add_style(stat6, &s_style_stat_label, LV_PART_MAIN);
+        snprintf(stat_buf, sizeof(stat_buf), "Origin: %s", meta.batch.origin[0] ? meta.batch.origin : "-");
+        lv_label_set_text(stat6, stat_buf);
+
+        lv_obj_t *stat_row4 = make_flex_row(root, content_w);
+        lv_obj_t *stat7 = lv_label_create(stat_row4);
+        lv_obj_add_style(stat7, &s_style_stat_label, LV_PART_MAIN);
+        snprintf(stat_buf, sizeof(stat_buf), "Weight: %.0f g", (double)meta.batch.weight_g);
+        lv_label_set_text(stat7, stat_buf);
+    }
+
     /* Force layout resolution NOW so the chart's real pixel size (needed to
      * map the target-curve overlay points) is known before rebuilding the
-     * dashed lines below - same lesson as the live dashboard's boot-blank
-     * bug: flex_grow sizes aren't resolved until a layout pass runs. */
+     * dashed lines below - flex_grow sizes aren't resolved until a layout
+     * pass runs. */
     lv_obj_update_layout(root);
     lv_coord_t chart_w = lv_obj_get_width(chart);
     lv_coord_t chart_h = lv_obj_get_height(chart);
@@ -326,12 +388,14 @@ static void show_session_detail(lv_obj_t *parent, const char *session_id)
             if (temp_frac > 1.0f) temp_frac = 1.0f;
             temp_pts[i].x = x;
             temp_pts[i].y = content_h - (lv_coord_t)(temp_frac * content_h);
+            if (temp_pts[i].y > content_h - 1) temp_pts[i].y = content_h - 1; /* Keep the 2px line inside the object's clip box. */
 
             float fan_frac = (float)target_fan / 100.0f;
             if (fan_frac < 0.0f) fan_frac = 0.0f;
             if (fan_frac > 1.0f) fan_frac = 1.0f;
             fan_pts[i].x = x;
             fan_pts[i].y = content_h - (lv_coord_t)(fan_frac * content_h);
+            if (fan_pts[i].y > content_h - 1) fan_pts[i].y = content_h - 1;
         }
 
         lv_obj_t *target_temp_line = lv_line_create(chart);
@@ -426,70 +490,6 @@ static void show_session_detail(lv_obj_t *parent, const char *session_id)
         }
     }
 
-    /* Compact single-line legend, short enough to never need ellipsis at
-     * this width. */
-    lv_obj_t *legend = lv_label_create(root);
-    lv_obj_add_style(legend, &s_style_stat_label, LV_PART_MAIN);
-    lv_label_set_text(legend, "Dashed = target, solid = actual (BT orange / Fan green)");
-    lv_label_set_long_mode(legend, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(legend, content_w);
-
-    /* Stats panel: two flex rows of two labels each (same row/space-between
-     * pattern as the rest of the layout), whatever's meaningfully derivable
-     * from the recorded telemetry (no event markers exist yet - T056 - so
-     * charge/FC/drop-specific stats like Artisan's aren't available yet;
-     * these are the honest subset that is). */
-    int64_t total_s = max_t_ms / 1000;
-    long avg_heater = (sample_count > 0) ? (heater_sum / (long)sample_count) : 0;
-    long avg_fan = (sample_count > 0) ? (fan_sum / (long)sample_count) : 0;
-    char stat_buf[64];
-
-    lv_obj_t *stat_row1 = make_flex_row(root, content_w);
-    lv_obj_t *stat1 = lv_label_create(stat_row1);
-    lv_obj_add_style(stat1, &s_style_stat_label, LV_PART_MAIN);
-    snprintf(stat_buf, sizeof(stat_buf), "Total time: %02d:%02d", (int)(total_s / 60), (int)(total_s % 60));
-    lv_label_set_text(stat1, stat_buf);
-    lv_obj_t *stat2 = lv_label_create(stat_row1);
-    lv_obj_add_style(stat2, &s_style_stat_label, LV_PART_MAIN);
-    snprintf(stat_buf, sizeof(stat_buf), "Max BT: %.1f C", max_bt);
-    lv_label_set_text(stat2, stat_buf);
-
-    lv_obj_t *stat_row2 = make_flex_row(root, content_w);
-    lv_obj_t *stat3 = lv_label_create(stat_row2);
-    lv_obj_add_style(stat3, &s_style_stat_label, LV_PART_MAIN);
-    snprintf(stat_buf, sizeof(stat_buf), "Max RoR: %.1f C/min", max_ror);
-    lv_label_set_text(stat3, stat_buf);
-    lv_obj_t *stat4 = lv_label_create(stat_row2);
-    lv_obj_add_style(stat4, &s_style_stat_label, LV_PART_MAIN);
-    snprintf(stat_buf, sizeof(stat_buf), "Avg Fan/Heater: %ld%%/%ld%%", avg_fan, avg_heater);
-    lv_label_set_text(stat4, stat_buf);
-
-    /* T057: batch metadata, only shown when the operator actually filled
-     * something in (older sessions and quick test roasts won't have it). */
-    bool has_batch_info = has_meta && (meta.batch.coffee_name[0] != '\0' ||
-                                        meta.batch.origin[0] != '\0' ||
-                                        meta.batch.weight_g > 0.0f);
-    if (has_batch_info) {
-        lv_obj_t *batch_title = lv_label_create(root);
-        lv_obj_add_style(batch_title, &s_style_stat_label, LV_PART_MAIN);
-        lv_label_set_text(batch_title, "Batch Info:");
-
-        lv_obj_t *stat_row3 = make_flex_row(root, content_w);
-        lv_obj_t *stat5 = lv_label_create(stat_row3);
-        lv_obj_add_style(stat5, &s_style_stat_label, LV_PART_MAIN);
-        snprintf(stat_buf, sizeof(stat_buf), "Coffee: %s", meta.batch.coffee_name[0] ? meta.batch.coffee_name : "-");
-        lv_label_set_text(stat5, stat_buf);
-        lv_obj_t *stat6 = lv_label_create(stat_row3);
-        lv_obj_add_style(stat6, &s_style_stat_label, LV_PART_MAIN);
-        snprintf(stat_buf, sizeof(stat_buf), "Origin: %s", meta.batch.origin[0] ? meta.batch.origin : "-");
-        lv_label_set_text(stat6, stat_buf);
-
-        lv_obj_t *stat_row4 = make_flex_row(root, content_w);
-        lv_obj_t *stat7 = lv_label_create(stat_row4);
-        lv_obj_add_style(stat7, &s_style_stat_label, LV_PART_MAIN);
-        snprintf(stat_buf, sizeof(stat_buf), "Weight: %.0f g", (double)meta.batch.weight_g);
-        lv_label_set_text(stat7, stat_buf);
-    }
 }
 
 static void session_item_event_cb(lv_event_t *e)

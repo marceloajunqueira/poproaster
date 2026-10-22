@@ -25,6 +25,11 @@ static const char *TAG = "roast_telemetry_svc";
 #define ROR_SMOOTHING_WINDOW_MS 30000
 #define SAMPLE_PERIOD_US (500 * 1000)
 
+/* Transient MAX6675 dropouts (EMI/glitches) must not trip the sensor-failure
+ * alarm: a sudden heater cut mid-roast ruins the batch. The last good BT is
+ * held for this long; only a dropout lasting longer is reported as invalid. */
+#define SENSOR_DROPOUT_GRACE_MS 15000
+
 /* Automatic Turning Point detection (per operator preference: TP is a pure
  * temperature-curve feature - the coolest moment right after CHARGE, before
  * BT starts climbing again - so it doesn't need a manual button; this
@@ -45,6 +50,10 @@ static char s_recording_session_id[SESSION_STORE_ID_MAX_LEN];
 static bool s_recording_active = false;
 static esp_timer_handle_t s_timer;
 static batch_record_t s_pending_batch;
+
+static float s_last_good_bt_c = 0.0f;
+static int64_t s_last_good_ms = 0;
+static bool s_dropout_logged = false;
 
 static roast_phase_t s_tp_last_phase = ROAST_PHASE_IDLE;
 static bool s_tp_detected = false;
@@ -106,6 +115,23 @@ static void sample_timer_cb(void *arg)
 
     max6675_sample_t sample;
     bool sensor_valid = (max6675_read(&sample) == ESP_OK && sample.quality == MAX6675_QUALITY_VALID);
+    bool held_sample = false;
+    int64_t now_ms = esp_timer_get_time() / 1000;
+
+    if (sensor_valid) {
+        s_last_good_bt_c = sample.bean_temp_c;
+        s_last_good_ms = now_ms;
+        s_dropout_logged = false;
+    } else if (s_last_good_ms != 0 && (now_ms - s_last_good_ms) <= SENSOR_DROPOUT_GRACE_MS) {
+        sample.bean_temp_c = s_last_good_bt_c;
+        sensor_valid = true;
+        held_sample = true;
+        if (!s_dropout_logged) {
+            ESP_LOGW(TAG, "Sensor dropout - holding last BT %.1fC for up to %d ms", s_last_good_bt_c,
+                     SENSOR_DROPOUT_GRACE_MS);
+            s_dropout_logged = true;
+        }
+    }
 
     /* The Safety Manager keeps its OWN sensor-valid/last-BT state (used to
      * gate heater-on requests, FR-006) fed exclusively through this call -
@@ -119,7 +145,7 @@ static void sample_timer_cb(void *arg)
 
     float bt = sensor_valid ? sample.bean_temp_c : 0.0f;
     update_turning_point_detection(session, bt, sensor_valid);
-    if (sensor_valid && active) {
+    if (sensor_valid && !held_sample && active) {
         ror_calculator_add_sample(s_ror_handle, sample.bean_temp_c, esp_timer_get_time() / 1000);
     }
     float ror_val = active ? ror_calculator_get_ror_c_per_min(s_ror_handle) : 0.0f;

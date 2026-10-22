@@ -13,5 +13,6 @@
     "--compile-commands-dir=c:\\Users\\mjunqueira_neowrk\\Desktop\\Repositorios\\PopRoaster\\firmware\\build"
   ],
   "idf.portWin": "COM87",
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "idf.port": "COM12"
 }

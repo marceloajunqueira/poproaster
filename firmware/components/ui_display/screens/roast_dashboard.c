@@ -300,12 +300,14 @@ static void rebuild_target_lines(void)
         if (temp_frac > 1.0f) temp_frac = 1.0f;
         s_target_temp_points[i].x = x;
         s_target_temp_points[i].y = content_h - (lv_coord_t)(temp_frac * content_h);
+        if (s_target_temp_points[i].y > content_h - 1) s_target_temp_points[i].y = content_h - 1; /* Keep the 2px line inside the object's clip box. */
 
         float fan_frac = (float)target_fan / 100.0f; /* Matches the chart's secondary Y range (0-100%). */
         if (fan_frac < 0.0f) fan_frac = 0.0f;
         if (fan_frac > 1.0f) fan_frac = 1.0f;
         s_target_fan_points[i].x = x;
         s_target_fan_points[i].y = content_h - (lv_coord_t)(fan_frac * content_h);
+        if (s_target_fan_points[i].y > content_h - 1) s_target_fan_points[i].y = content_h - 1;
     }
 
     lv_obj_set_size(s_target_temp_line, content_w, content_h);

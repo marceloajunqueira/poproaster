@@ -105,6 +105,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Re-tagging the same version replaces its release instead of failing.
+          gh release delete "$GITHUB_REF_NAME" --yes || true
           gh release create "$GITHUB_REF_NAME" release/*.bin \
             --title "Pop Roaster $GITHUB_REF_NAME" \
             --generate-notes
